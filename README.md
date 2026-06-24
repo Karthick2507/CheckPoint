@@ -112,7 +112,7 @@ python bcv_analyzer.py \
 
 Example:
 
-I don't mind at all if you use my username/token to submit presto queries like shown below. If you want to use your own username/token, please follow this wiki guide https://freewheel.atlassian.net/wiki/spaces/DDEU2/pages/528557481/Presto+Gateway+Userguide#Geta-a-token-with-LDAP-account to get a token.
+I don't mind at all if you use my username/token to submit presto queries like shown below. If you want to use your own username/token, please follow this wiki guide https://freewheel.atlassian.net/wiki/spaces/DDEU2/pages/528557481/Presto+Gateway+Userguide#Geta-a-token-with-LDAP-account to get a token. Please note token will be expired in 30 days, and you will have to re-apply it following the steps in the above link.
 
 ```bash
 python bcv_analyzer.py \
