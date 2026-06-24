@@ -22,7 +22,7 @@ A command-line tool for analyzing schema differences between the **SRC** (source
   - [4. Analysis Summary](#4-analysis-summary)
 - [Analysis Rules](#analysis-rules)
 - [Output](#output)
-  - [result.csv](#resultcsv)
+  - [`<table>_result.csv`](#table_resultcsv)
   - [JSON Files](#json-files)
 - [Supported Tables](#supported-tables)
 - [Thresholds Reference](#thresholds-reference)
@@ -31,12 +31,12 @@ A command-line tool for analyzing schema differences between the **SRC** (source
 
 ## Overview
 
-BCV Analyzer compares the schema of a source table (`mrm_log_flat.default.<table>`) against its corresponding BCV table (`etl.public_test1.<table>`), identifies **DIFF** columns (columns present in SRC but missing in BCV), queries Presto for their historical usage data, and produces a prioritized backfill recommendation report.
+BCV Analyzer compares the schema of a source table (`mrm_log_flat.default.<table>`) against its corresponding BCV table (`etl.public_test1.<table>`), identifies **DIFF** columns (columns present in SRC but missing in BCV), checks whether those columns are used by ETL, queries Presto for their historical usage data, and produces a prioritized backfill recommendation report.
 
 ```
 SRC Table  ──┐
-             ├──► Schema Comparison ──► DIFF Columns ──► Presto Usage Query ──► Analysis Summary + result.csv
-BCV Table  ──┘                                               (batch, 100/query)
+             ├──► Schema Comparison ──► DIFF Columns ──► ETL Usage Check ──► Presto Usage Query ──► Analysis Summary + <table>_result.csv
+BCV Table  ──┘                                                                  (batch, 100/query)
 ```
 
 ---
@@ -47,6 +47,7 @@ BCV Table  ──┘                                               (batch, 100/q
 BCV/
 ├── bcv_analyzer.py          # Main application
 ├── requirements.txt         # Python dependencies
+├── etl_fields.json          # ETL-used fields, grouped by table name
 ├── field_size/              # Column size data (one .xlsx per table)
 │   ├── request_raw_size_in_TiB.xlsx
 │   ├── ad_raw_size_in_TiB.xlsx
@@ -55,7 +56,7 @@ BCV/
 │   ├── auction_raw_size_in_TiB.xlsx
 │   └── ack_raw_size_in_TiB.xlsx
 ├── output/                  # Generated output (auto-created)
-│   ├── result.csv           # Main analysis result
+│   ├── <table>_result.csv   # Main analysis result
 │   ├── <table>.json         # SRC column list
 │   └── bcv_<table>.json     # BCV column list
 └── tests/
@@ -69,6 +70,7 @@ BCV/
 - Python 3.11+
 - Access to a Presto/Trino gateway
 - Column size `.xlsx` files in the `field_size/` directory
+- `etl_fields.json` in the project root for ETL usage lookup
 
 ---
 
@@ -179,7 +181,7 @@ When prompted, select one of two run modes:
 | **Trial**    | Queries Presto for the **first 10** DIFF columns only. Useful for quickly testing connectivity and validating results before a full run. |
 | **Full Run** | Queries Presto for **all** DIFF columns. May take significantly longer depending on the number of missing columns. |
 
-> **Note:** In Trial mode, columns beyond the first 10 will have no usage data and will show a blank `recommended_action` in the output CSV.
+> **Note:** In Trial mode, columns beyond the first 10 will have no Presto usage data. ETL usage is still checked before Presto usage, so ETL-used columns can still receive a `recommended_action`.
 
 ---
 
@@ -208,10 +210,23 @@ The xlsx must contain at minimum two columns: `Field Name` and `Size (TiB)`.
 
 ### 3. Usage Data Query
 
-For each DIFF column (SRC present, BCV missing), the tool queries the Presto internal usage tracking tables to find how many distinct queries accessed the column, broken down by user type:
+For each DIFF column (SRC present, BCV missing), the tool first checks `etl_fields.json` to determine whether ETL uses the column. The file is organized by table name:
+
+```json
+{
+  "request": [
+    "request.context.distributor_asset_id"
+  ]
+}
+```
+
+When matching column names, the tool temporarily normalizes the SRC field name by replacing `__` with `.`. For example, `request__context__distributor_asset_id` matches `request.context.distributor_asset_id` in `etl_fields.json`.
+
+The tool then queries the Presto internal usage tracking tables to find how many distinct queries accessed the column, broken down by user type:
 
 | User Type  | Description                                                                 |
 |------------|-----------------------------------------------------------------------------|
+| `ETL`      | Column appears in `etl_fields.json` for the selected table                  |
 | `Insights` | Queries from internal Insights service accounts (`sa-dataapp-insights`, etc.) |
 | `Arena`    | Queries from Arena-based sources                                            |
 | `LQS`      | Queries from LQS-based sources                                              |
@@ -247,6 +262,7 @@ The following rules are applied to all DIFF rows where **SRC has a value** and *
 
 | Source    | Threshold  |
 |-----------|-----------|
+| ETL       | > 0       |
 | Insights  | > 0       |
 | Arena     | > 0       |
 | LQS       | ≥ 10      |
@@ -258,9 +274,9 @@ The following rules are applied to all DIFF rows where **SRC has a value** and *
 
 ## Output
 
-### result.csv
+### `<table>_result.csv`
 
-Written to `output/result.csv`. Contains one row per column comparison with the following fields:
+Written to `output/<table>_result.csv`. Contains one row per column comparison with the following fields:
 
 | Column               | Description                                                  |
 |----------------------|--------------------------------------------------------------|
@@ -270,6 +286,7 @@ Written to `output/result.csv`. Contains one row per column comparison with the 
 | `bcv_field`          | Column name in the BCV table (empty if missing)              |
 | `bcv_type`           | Column type in the BCV table (empty if missing)              |
 | `size`               | Raw column size in TiB (empty if not found in size data)     |
+| `usage:ETL`          | `1` if the column is used by ETL according to `etl_fields.json`; otherwise empty |
 | `usage:Insights`     | Number of distinct Insights service account queries using this column |
 | `usage:Arena`        | Number of distinct Arena queries using this column           |
 | `usage:LQS`          | Number of distinct LQS queries using this column             |
@@ -309,7 +326,5 @@ All thresholds are defined as constants at the top of `bcv_analyzer.py` for easy
 | `USAGE_QUERY_LIMIT`       | `10`   | Number of columns queried in Trial mode         |
 | `USAGE_QUERY_BATCH_SIZE`  | `100`  | Columns per Presto batch query                  |
 | `USAGE_QUERY_MAX_RETRIES` | `3`    | Max retry attempts per batch on failure         |
-
-
 
 
