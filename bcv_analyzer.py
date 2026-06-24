@@ -27,8 +27,9 @@ UI_CONSOLE = Console()
 _SCRIPT_DIR = Path(__file__).parent
 OUTPUT_DIR = _SCRIPT_DIR / "output"
 FIELD_SIZE_DIR = _SCRIPT_DIR / "field_size"
+ETL_FIELDS_PATH = _SCRIPT_DIR / "etl_fields.json"
 APP_VERSION = "v0.1"
-USAGE_COLUMNS = ("usage:Insights", "usage:Arena", "usage:LQS", "usage:Others")
+USAGE_COLUMNS = ("usage:ETL", "usage:Insights", "usage:Arena", "usage:LQS", "usage:Others")
 USAGE_QUERY_LIMIT = 10
 USAGE_QUERY_BATCH_SIZE = 100
 USAGE_QUERY_MAX_RETRIES = 3
@@ -182,6 +183,8 @@ FROM (
     AND q.user NOT IN ('sqyang', 'yjgou', 'kbhargava', 'yuwang', 'zhfan')
     AND q.source NOT IN ('presto-python-client')
     AND p.col IN ({col_list})
+    AND (NOT regexp_like(q.query, '(?i)select\\s*\\*'))
+    AND error_type is null AND error_name is null
 ) a
 GROUP BY 1, 2
 ORDER BY 1, 3 DESC
@@ -249,6 +252,30 @@ def load_field_sizes(table: str, field_size_dir: Path = FIELD_SIZE_DIR) -> dict[
         if field_name and size is not None:
             field_sizes[str(field_name)] = float(size)
     return field_sizes
+
+
+def load_etl_fields(table: str, etl_fields_path: Path = ETL_FIELDS_PATH) -> set[str]:
+    if not etl_fields_path.exists():
+        return set()
+
+    data = json.loads(etl_fields_path.read_text(encoding="utf-8"))
+    return {str(field) for field in data.get(table, [])}
+
+
+def add_etl_usage_info(
+    table: str,
+    rows: list[dict[str, Any]],
+    etl_fields_path: Path = ETL_FIELDS_PATH,
+) -> list[dict[str, Any]]:
+    etl_fields = load_etl_fields(table, etl_fields_path)
+    for row in rows:
+        row.setdefault("usage:ETL", "")
+        if not is_missing_bcv_column(row):
+            continue
+        normalized_src_field = normalize_field_name_for_size_lookup(str(row.get("src_field") or ""))
+        if normalized_src_field in etl_fields:
+            row["usage:ETL"] = 1
+    return rows
 
 
 def compare_schema_rows(
@@ -473,9 +500,9 @@ def resolve_table(table: str | None) -> str:
         Panel(
             f"{APP_BANNER}\nBCV Analyzer {APP_VERSION}\nUse ↑/↓ to choose a table, then press Enter.\n\n"
             "[bold]Analysis Summary Rules[/bold] (applied to DIFF rows where SRC has value, BCV is missing):\n"
-            "  [bold cyan]■ Recommended for Backfill   [/bold cyan]: usage (Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size < 0.03 TiB (or unknown)\n"
-            "  [bold yellow]■ Recommended Excluded       [/bold yellow]: usage (Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size ≥ 0.03 TiB\n"
-            "  [bold red]■ Recommended No Backfill    [/bold red]: usage below threshold  (Insights = 0, Arena = 0, LQS < 10, Others < 100)",
+            "  [bold cyan]■ Recommended for Backfill   [/bold cyan]: usage (ETL [bold]> 0[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size < 0.03 TiB (or unknown)\n"
+            "  [bold yellow]■ Recommended Excluded       [/bold yellow]: usage (ETL [bold]> 0[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size ≥ 0.03 TiB\n"
+            "  [bold red]■ Recommended No Backfill    [/bold red]: usage below threshold  (ETL = 0, Insights = 0, Arena = 0, LQS < 10, Others < 100)",
             title="BCV Analyzer",
             border_style="cyan",
         )
@@ -524,7 +551,8 @@ def get_usage_int(row: dict[str, Any], column: str) -> int:
 
 def usage_meets_threshold(row: dict[str, Any]) -> bool:
     return (
-        get_usage_int(row, "usage:Insights") > 0
+        get_usage_int(row, "usage:ETL") > 0
+        or get_usage_int(row, "usage:Insights") > 0
         or get_usage_int(row, "usage:Arena") > 0
         or get_usage_int(row, "usage:LQS") >= 10
         or get_usage_int(row, "usage:Others") >= 100
@@ -534,7 +562,7 @@ def usage_meets_threshold(row: dict[str, Any]) -> bool:
 def get_recommended_action(row: dict[str, Any], was_queried: bool) -> str:
     if not is_missing_bcv_column(row):
         return ""
-    if not was_queried:
+    if not was_queried and get_usage_int(row, "usage:ETL") == 0:
         return ""
     if usage_meets_threshold(row):
         size = row.get("size")
@@ -577,17 +605,12 @@ def print_analysis_summary(queried_rows: list[dict[str, Any]]) -> None:
         rec_table.add_column("#", justify="right", style="dim", no_wrap=True)
         rec_table.add_column("Column Name", style="bold white", no_wrap=True)
         rec_table.add_column("Size (TiB)", justify="right", style="green", no_wrap=True)
-        rec_table.add_column("usage:Insights", justify="right", no_wrap=True)
-        rec_table.add_column("usage:Arena", justify="right", no_wrap=True)
-        rec_table.add_column("usage:LQS", justify="right", no_wrap=True)
-        rec_table.add_column("usage:Others", justify="right", no_wrap=True)
+        for column in USAGE_COLUMNS:
+            rec_table.add_column(column, justify="right", no_wrap=True)
         for i, row in enumerate(recommended, 1):
             rec_table.add_row(
                 str(i), str(row["src_field"]), str(row["size"]),
-                str(row.get("usage:Insights") or ""),
-                str(row.get("usage:Arena") or ""),
-                str(row.get("usage:LQS") or ""),
-                str(row.get("usage:Others") or ""),
+                *(str(row.get(column) or "") for column in USAGE_COLUMNS),
             )
         UI_CONSOLE.print(Panel(
             rec_table,
@@ -607,17 +630,12 @@ def print_analysis_summary(queried_rows: list[dict[str, Any]]) -> None:
         exc_table.add_column("#", justify="right", style="dim", no_wrap=True)
         exc_table.add_column("Column Name", style="white", no_wrap=True)
         exc_table.add_column("Size (TiB)", justify="right", style="yellow", no_wrap=True)
-        exc_table.add_column("usage:Insights", justify="right", no_wrap=True)
-        exc_table.add_column("usage:Arena", justify="right", no_wrap=True)
-        exc_table.add_column("usage:LQS", justify="right", no_wrap=True)
-        exc_table.add_column("usage:Others", justify="right", no_wrap=True)
+        for column in USAGE_COLUMNS:
+            exc_table.add_column(column, justify="right", no_wrap=True)
         for i, row in enumerate(excluded, 1):
             exc_table.add_row(
                 str(i), str(row["src_field"]), str(row["size"]),
-                str(row.get("usage:Insights") or ""),
-                str(row.get("usage:Arena") or ""),
-                str(row.get("usage:LQS") or ""),
-                str(row.get("usage:Others") or ""),
+                *(str(row.get(column) or "") for column in USAGE_COLUMNS),
             )
         UI_CONSOLE.print(Panel(
             exc_table,
@@ -631,17 +649,12 @@ def print_analysis_summary(queried_rows: list[dict[str, Any]]) -> None:
         low_table.add_column("#", justify="right", style="dim", no_wrap=True)
         low_table.add_column("Column Name", style="white", no_wrap=True)
         low_table.add_column("Size (TiB)", justify="right", no_wrap=True)
-        low_table.add_column("usage:Insights", justify="right", no_wrap=True)
-        low_table.add_column("usage:Arena", justify="right", no_wrap=True)
-        low_table.add_column("usage:LQS", justify="right", no_wrap=True)
-        low_table.add_column("usage:Others", justify="right", no_wrap=True)
+        for column in USAGE_COLUMNS:
+            low_table.add_column(column, justify="right", no_wrap=True)
         for i, row in enumerate(low_usage, 1):
             low_table.add_row(
                 str(i), str(row["src_field"]), str(row["size"]),
-                str(row.get("usage:Insights") or ""),
-                str(row.get("usage:Arena") or ""),
-                str(row.get("usage:LQS") or ""),
-                str(row.get("usage:Others") or ""),
+                *(str(row.get(column) or "") for column in USAGE_COLUMNS),
             )
         UI_CONSOLE.print(Panel(
             low_table,
@@ -707,17 +720,25 @@ def main(
     src_output_rows = remove_describe_metadata_columns(rows)
     bcv_output_rows = remove_describe_metadata_columns(bcv_rows)
     log_info("Retrieving column size")
-    field_sizes = load_field_sizes(selected_table)
+    field_sizes = load_field_sizes(selected_table, FIELD_SIZE_DIR)
     write_rows_as_json_file(src_output_rows, selected_table)
     write_rows_as_json_file(bcv_output_rows, f"bcv_{selected_table}")
     comparison_rows = compare_schema_rows(selected_table, src_output_rows, bcv_output_rows, field_sizes)
+    add_etl_usage_info(selected_table, comparison_rows, ETL_FIELDS_PATH)
     usage_limit = USAGE_QUERY_LIMIT if run_mode == RunMode.TRIAL else sys.maxsize
     comparison_rows, queried_rows = add_usage_info(selected_table, comparison_rows, src_connection_kwargs, limit=usage_limit)
     queried_fields = {str(r["src_field"]) for r in queried_rows}
+    summary_rows = list(queried_rows)
+    summary_fields = set(queried_fields)
+    for row in comparison_rows:
+        src_field = str(row.get("src_field") or "")
+        if is_missing_bcv_column(row) and get_usage_int(row, "usage:ETL") > 0 and src_field not in summary_fields:
+            summary_rows.append(row)
+            summary_fields.add(src_field)
     for row in comparison_rows:
         was_queried = is_missing_bcv_column(row) and str(row.get("src_field")) in queried_fields
         row["recommended_action"] = get_recommended_action(row, was_queried)
-    print_analysis_summary(queried_rows)
+    print_analysis_summary(summary_rows)
     result_filename = f"{selected_table}_result.csv"
     write_rows_as_csv_file(
         comparison_rows,

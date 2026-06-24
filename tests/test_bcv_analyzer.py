@@ -125,12 +125,23 @@ class BcvAnalyzerTests(unittest.TestCase):
                             src_rows,
                             bcv_rows,
                             [
-                                {"user": "Arena", "usage_count": 3},
-                                {"user": "Others", "usage_count": 2},
+                                {
+                                    "column_name": "request__context__distributor_asset_id",
+                                    "user": "Arena",
+                                    "usage_count": 3,
+                                },
+                                {
+                                    "column_name": "request__context__distributor_asset_id",
+                                    "user": "Others",
+                                    "usage_count": 2,
+                                },
                             ],
                         ],
                     ) as execute,
                     patch.object(bcv_analyzer, "FIELD_SIZE_DIR", field_size_dir),
+                    patch.object(bcv_analyzer, "OUTPUT_DIR", Path(tmpdir) / "output"),
+                    patch.object(bcv_analyzer, "ETL_FIELDS_PATH", Path(tmpdir) / "missing_etl_fields.json"),
+                    patch.object(bcv_analyzer, "resolve_run_mode", return_value=bcv_analyzer.RunMode.TRIAL),
                     patch.object(bcv_analyzer, "current_timestamp", return_value="2026-06-24 12:34:56"),
                     redirect_stdout(io.StringIO()) as stdout,
                 ):
@@ -139,7 +150,7 @@ class BcvAnalyzerTests(unittest.TestCase):
                 output_dir = Path(tmpdir) / "output"
                 written_rows = json.loads((output_dir / "request.json").read_text(encoding="utf-8"))
                 written_bcv_rows = json.loads((output_dir / "bcv_request.json").read_text(encoding="utf-8"))
-                with (output_dir / "result.csv").open(encoding="utf-8") as result_file:
+                with (output_dir / "request_result.csv").open(encoding="utf-8") as result_file:
                     result_rows = list(csv.DictReader(result_file))
             finally:
                 os.chdir(original_cwd)
@@ -154,13 +165,8 @@ class BcvAnalyzerTests(unittest.TestCase):
         self.assertEqual(execute.call_args_list[0].kwargs["connection_kwargs"]["schema"], "default")
         self.assertEqual(execute.call_args_list[1].kwargs["connection_kwargs"]["catalog"], "etl")
         self.assertEqual(execute.call_args_list[1].kwargs["connection_kwargs"]["schema"], "public_test1")
-        self.assertEqual(
-            stdout.getvalue(),
-            "[2026-06-24 12:34:56] retrieving column list for table: mrm_log_flat.default.request\n"
-            "[2026-06-24 12:34:56] retrieving column list for table: etl.public_test1.request\n"
-            "[2026-06-24 12:34:56] retrieving column size\n"
-            "\r[2026-06-24 12:34:56] retrieving usage info for missing column in BCV: 1/1\n",
-        )
+        self.assertIn("[2026-06-24 12:34:56] Retrieving column list for table: mrm_log_flat.default.request", stdout.getvalue())
+        self.assertIn("[2026-06-24 12:34:56] Retrieving column size", stdout.getvalue())
         self.assertEqual(len(written_rows), 3)
         self.assertEqual(
             set(written_rows[0].keys()),
@@ -177,9 +183,12 @@ class BcvAnalyzerTests(unittest.TestCase):
                     "bcv_field": "matched_col",
                     "bcv_type": "varchar",
                     "size": "",
+                    "usage:ETL": "",
+                    "usage:Insights": "",
                     "usage:Arena": "",
                     "usage:LQS": "",
                     "usage:Others": "",
+                    "recommended_action": "",
                 },
                 {
                     "status": "DIFF",
@@ -188,9 +197,12 @@ class BcvAnalyzerTests(unittest.TestCase):
                     "bcv_field": "",
                     "bcv_type": "",
                     "size": "1.24",
+                    "usage:ETL": "",
+                    "usage:Insights": "",
                     "usage:Arena": "3",
                     "usage:LQS": "",
                     "usage:Others": "2",
+                    "recommended_action": "Excluded - Size Too Large",
                 },
                 {
                     "status": "DIFF",
@@ -199,9 +211,12 @@ class BcvAnalyzerTests(unittest.TestCase):
                     "bcv_field": "type_changed",
                     "bcv_type": "bigint",
                     "size": "",
+                    "usage:ETL": "",
+                    "usage:Insights": "",
                     "usage:Arena": "",
                     "usage:LQS": "",
                     "usage:Others": "",
+                    "recommended_action": "",
                 },
                 {
                     "status": "DIFF",
@@ -210,9 +225,12 @@ class BcvAnalyzerTests(unittest.TestCase):
                     "bcv_field": "bcv_only",
                     "bcv_type": "array(varchar)",
                     "size": "",
+                    "usage:ETL": "",
+                    "usage:Insights": "",
                     "usage:Arena": "",
                     "usage:LQS": "",
                     "usage:Others": "",
+                    "recommended_action": "",
                 },
             ],
         )
@@ -240,15 +258,22 @@ class BcvAnalyzerTests(unittest.TestCase):
             }
         )
 
+        usage_rows = [
+            {"column_name": f"col_{index}", "user": "LQS", "usage_count": 4}
+            for index in range(10)
+        ]
+
         with (
-            patch.object(bcv_analyzer, "execute_sql", return_value=[{"user": "LQS", "usage_count": 4}]) as execute,
+            patch.object(bcv_analyzer, "execute_sql", return_value=usage_rows) as execute,
             redirect_stdout(io.StringIO()),
         ):
             add_usage_info("request", rows, {"catalog": "mrm_log_flat"})
 
-        self.assertEqual(execute.call_count, 10)
-        self.assertEqual(execute.call_args_list[0].args[0], build_usage_sql("request", "col_0"))
-        self.assertEqual(execute.call_args_list[9].args[0], build_usage_sql("request", "col_9"))
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(
+            execute.call_args_list[0].args[0],
+            bcv_analyzer.build_usage_sql_batch("request", [f"col_{index}" for index in range(10)]),
+        )
         self.assertEqual(rows[0]["usage:LQS"], 4)
         self.assertEqual(rows[9]["usage:LQS"], 4)
         self.assertEqual(rows[10]["usage:LQS"], "")
@@ -268,32 +293,32 @@ class BcvAnalyzerTests(unittest.TestCase):
         ]
 
         with (
-            patch.object(bcv_analyzer, "execute_sql", return_value=[]),
+            patch.object(bcv_analyzer, "execute_sql", return_value=[]) as execute,
             patch.object(bcv_analyzer, "current_timestamp", return_value="2026-06-24 12:34:56"),
             redirect_stdout(io.StringIO()) as stdout,
         ):
             add_usage_info("request", rows, {"catalog": "mrm_log_flat"})
 
-        self.assertEqual(
-            stdout.getvalue(),
-            "\r[2026-06-24 12:34:56] retrieving usage info for missing column in BCV: 1/2"
-            "\r[2026-06-24 12:34:56] retrieving usage info for missing column in BCV: 2/2\n",
-        )
+        self.assertEqual(execute.call_count, 1)
+        self.assertIn("Retrieving usage info for missing columns in BCV", stdout.getvalue())
 
     def test_build_usage_sql_uses_latest_query_template(self):
         sql = build_usage_sql("request", "request__context__custom_distributor_signature")
 
-        self.assertIn("CASE\n        WHEN a.source LIKE '%Arena%' THEN 'Arena'", sql)
+        self.assertIn("WHEN a.source LIKE '%Arena%' THEN 'Arena'", sql)
         self.assertIn("WHEN a.source LIKE '%lqs%' THEN 'LQS'", sql)
-        self.assertIn("SELECT DISTINCT\n    q.pid,\n    q.user,\n    q.source,", sql)
+        self.assertIn("SELECT DISTINCT\n        q.pid,\n        q.user,\n        q.source,", sql)
         self.assertIn(
             "AND q.user NOT IN ('sqyang', 'yjgou', 'kbhargava', 'yuwang', 'zhfan')",
             sql,
         )
         self.assertIn("AND q.source NOT IN ('presto-python-client')", sql)
-        self.assertIn("pcu.catalog = 'mrm_log_flat' AND pcu.table_name = 'request'", sql)
-        self.assertIn("AND col = 'request__context__custom_distributor_signature'", sql)
-        self.assertIn("GROUP BY 1\nORDER BY 2 DESC", sql)
+        self.assertIn("AND pcu.catalog = 'mrm_log_flat'", sql)
+        self.assertIn("AND pcu.table_name = 'request'", sql)
+        self.assertIn("AND p.col IN ('request__context__custom_distributor_signature')", sql)
+        self.assertIn("AND (NOT regexp_like(q.query, '(?i)select\\s*\\*'))", sql)
+        self.assertIn("AND error_type is null AND error_name is null", sql)
+        self.assertIn("GROUP BY 1, 2\nORDER BY 1, 3 DESC", sql)
 
     def test_compare_schema_rows_matches_by_field_and_type(self):
         compared = compare_schema_rows(
@@ -364,6 +389,56 @@ class BcvAnalyzerTests(unittest.TestCase):
                 {"request.context.distributor_asset_id": 1.236},
             )
 
+    def test_add_etl_usage_info_matches_src_field_with_double_underscore_normalization(self):
+        rows = [
+            {
+                "status": "DIFF",
+                "src_field": "request__context__distributor_asset_id",
+                "src_type": "bigint",
+                "bcv_field": "",
+                "bcv_type": "",
+                "size": "",
+            },
+            {
+                "status": "DIFF",
+                "src_field": "request__context__other_id",
+                "src_type": "bigint",
+                "bcv_field": "",
+                "bcv_type": "",
+                "size": "",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            etl_fields_path = Path(tmpdir) / "etl_fields.json"
+            etl_fields_path.write_text(
+                json.dumps({"request": ["request.context.distributor_asset_id"]}),
+                encoding="utf-8",
+            )
+
+            bcv_analyzer.add_etl_usage_info("request", rows, etl_fields_path=etl_fields_path)
+
+        self.assertEqual(rows[0]["usage:ETL"], 1)
+        self.assertEqual(rows[1]["usage:ETL"], "")
+
+    def test_etl_usage_meets_threshold_for_backfill_without_presto_query(self):
+        row = {
+            "status": "DIFF",
+            "src_field": "request__context__distributor_asset_id",
+            "src_type": "bigint",
+            "bcv_field": "",
+            "bcv_type": "",
+            "size": "",
+            "usage:ETL": 1,
+            "usage:Insights": "",
+            "usage:Arena": "",
+            "usage:LQS": "",
+            "usage:Others": "",
+        }
+
+        self.assertTrue(bcv_analyzer.usage_meets_threshold(row))
+        self.assertEqual(bcv_analyzer.get_recommended_action(row, was_queried=False), "Backfill")
+
     def test_build_describe_sql_uses_full_table_name(self):
         self.assertEqual(
             build_full_table_name("request"),
@@ -384,7 +459,8 @@ class BcvAnalyzerTests(unittest.TestCase):
 
     def test_main_requires_connection_args(self):
         with self.assertRaises(SystemExit):
-            bcv_analyzer.main(host=None, user="analyst", table="request")
+            with patch.object(bcv_analyzer, "resolve_run_mode", return_value=bcv_analyzer.RunMode.TRIAL):
+                bcv_analyzer.main(host=None, user="analyst", table="request")
 
     def test_execute_sql_runs_statement_and_returns_dict_rows(self):
         engine = FakeEngine([(1, "slot"), (2, "request")], ["query_count", "col"])
