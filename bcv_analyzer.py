@@ -274,7 +274,7 @@ def add_etl_usage_info(
             continue
         normalized_src_field = normalize_field_name_for_size_lookup(str(row.get("src_field") or ""))
         if normalized_src_field in etl_fields:
-            row["usage:ETL"] = 1
+            row["usage:ETL"] = "Y"
     return rows
 
 
@@ -500,9 +500,9 @@ def resolve_table(table: str | None) -> str:
         Panel(
             f"{APP_BANNER}\nBCV Analyzer {APP_VERSION}\nUse ↑/↓ to choose a table, then press Enter.\n\n"
             "[bold]Analysis Summary Rules[/bold] (applied to DIFF rows where SRC has value, BCV is missing):\n"
-            "  [bold cyan]■ Recommended for Backfill   [/bold cyan]: usage (ETL [bold]> 0[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size < 0.03 TiB (or unknown)\n"
-            "  [bold yellow]■ Recommended Excluded       [/bold yellow]: usage (ETL [bold]> 0[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size ≥ 0.03 TiB\n"
-            "  [bold red]■ Recommended No Backfill    [/bold red]: usage below threshold  (ETL = 0, Insights = 0, Arena = 0, LQS < 10, Others < 100)",
+            "  [bold cyan]■ Recommended for Backfill   [/bold cyan]: usage (ETL = [bold]Y[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size < 0.03 TiB (or unknown)\n"
+            "  [bold yellow]■ Recommended Excluded       [/bold yellow]: usage (ETL = [bold]Y[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size ≥ 0.03 TiB\n"
+            "  [bold red]■ Recommended No Backfill    [/bold red]: usage below threshold  (ETL is blank, Insights = 0, Arena = 0, LQS < 10, Others < 100)",
             title="BCV Analyzer",
             border_style="cyan",
         )
@@ -549,9 +549,13 @@ def get_usage_int(row: dict[str, Any], column: str) -> int:
         return 0
 
 
+def is_etl_used(row: dict[str, Any]) -> bool:
+    return row.get("usage:ETL") == "Y"
+
+
 def usage_meets_threshold(row: dict[str, Any]) -> bool:
     return (
-        get_usage_int(row, "usage:ETL") > 0
+        is_etl_used(row)
         or get_usage_int(row, "usage:Insights") > 0
         or get_usage_int(row, "usage:Arena") > 0
         or get_usage_int(row, "usage:LQS") >= 10
@@ -562,7 +566,7 @@ def usage_meets_threshold(row: dict[str, Any]) -> bool:
 def get_recommended_action(row: dict[str, Any], was_queried: bool) -> str:
     if not is_missing_bcv_column(row):
         return ""
-    if not was_queried and get_usage_int(row, "usage:ETL") == 0:
+    if not was_queried and not is_etl_used(row):
         return ""
     if usage_meets_threshold(row):
         size = row.get("size")
@@ -732,7 +736,7 @@ def main(
     summary_fields = set(queried_fields)
     for row in comparison_rows:
         src_field = str(row.get("src_field") or "")
-        if is_missing_bcv_column(row) and get_usage_int(row, "usage:ETL") > 0 and src_field not in summary_fields:
+        if is_missing_bcv_column(row) and is_etl_used(row) and src_field not in summary_fields:
             summary_rows.append(row)
             summary_fields.add(src_field)
     for row in comparison_rows:

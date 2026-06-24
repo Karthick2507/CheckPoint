@@ -418,7 +418,7 @@ class BcvAnalyzerTests(unittest.TestCase):
 
             bcv_analyzer.add_etl_usage_info("request", rows, etl_fields_path=etl_fields_path)
 
-        self.assertEqual(rows[0]["usage:ETL"], 1)
+        self.assertEqual(rows[0]["usage:ETL"], "Y")
         self.assertEqual(rows[1]["usage:ETL"], "")
 
     def test_etl_usage_meets_threshold_for_backfill_without_presto_query(self):
@@ -429,7 +429,7 @@ class BcvAnalyzerTests(unittest.TestCase):
             "bcv_field": "",
             "bcv_type": "",
             "size": "",
-            "usage:ETL": 1,
+            "usage:ETL": "Y",
             "usage:Insights": "",
             "usage:Arena": "",
             "usage:LQS": "",

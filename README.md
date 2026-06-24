@@ -262,7 +262,7 @@ The following rules are applied to all DIFF rows where **SRC has a value** and *
 
 | Source    | Threshold  |
 |-----------|-----------|
-| ETL       | > 0       |
+| ETL       | `Y`       |
 | Insights  | > 0       |
 | Arena     | > 0       |
 | LQS       | ≥ 10      |
@@ -286,7 +286,7 @@ Written to `output/<table>_result.csv`. Contains one row per column comparison w
 | `bcv_field`          | Column name in the BCV table (empty if missing)              |
 | `bcv_type`           | Column type in the BCV table (empty if missing)              |
 | `size`               | Raw column size in TiB (empty if not found in size data)     |
-| `usage:ETL`          | `1` if the column is used by ETL according to `etl_fields.json`; otherwise empty |
+| `usage:ETL`          | `Y` if the column is used by ETL according to `etl_fields.json`; otherwise empty |
 | `usage:Insights`     | Number of distinct Insights service account queries using this column |
 | `usage:Arena`        | Number of distinct Arena queries using this column           |
 | `usage:LQS`          | Number of distinct LQS queries using this column             |
@@ -326,5 +326,4 @@ All thresholds are defined as constants at the top of `bcv_analyzer.py` for easy
 | `USAGE_QUERY_LIMIT`       | `10`   | Number of columns queried in Trial mode         |
 | `USAGE_QUERY_BATCH_SIZE`  | `100`  | Columns per Presto batch query                  |
 | `USAGE_QUERY_MAX_RETRIES` | `3`    | Max retry attempts per batch on failure         |
-
 
