@@ -1,6 +1,6 @@
 # BCV Analyzer
 
-A command-line tool for analyzing schema differences between the **SRC** (source) tables and **BCV** (Backfill Column Value) tables in Presto/Trino, and generating backfill recommendations based on column usage data.
+A command-line tool for analyzing schema differences between the **SRC** (source) tables and **BCV** (Backward Compatible View) tables in Presto/Trino, and generating backfill recommendations based on column usage data.
 
 ---
 
