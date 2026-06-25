@@ -29,6 +29,7 @@ OUTPUT_DIR = _SCRIPT_DIR / "output"
 FIELD_SIZE_DIR = _SCRIPT_DIR / "field_size"
 ETL_FIELDS_PATH = _SCRIPT_DIR / "etl_fields.json"
 SOS_FIELDS_PATH = _SCRIPT_DIR / "sos_fields.csv"
+EXCLUDE_FIELDS_PATH = _SCRIPT_DIR / "exclude.csv"
 APP_VERSION = "v0.1"
 USAGE_COLUMNS = ("usage:ETL", "usage:SOS", "usage:Insights", "usage:Arena", "usage:LQS", "usage:CP", "usage:AF", "usage:Others")
 USAGE_QUERY_BATCH_SIZE = 500
@@ -326,6 +327,20 @@ def add_sos_usage_info(
         if normalized_src_field in sos_fields:
             row["usage:SOS"] = "Y"
     return rows
+
+
+def load_excluded_fields(table: str, exclude_path: Path = EXCLUDE_FIELDS_PATH) -> set[str]:
+    """Return the set of src_field names (__ notation) to exclude for *table*."""
+    if not exclude_path.exists():
+        return set()
+    fields: set[str] = set()
+    with exclude_path.open(encoding="utf-8", newline="") as f:
+        for ex_row in csv.DictReader(f):
+            tbl = (ex_row.get("table") or "").strip()
+            col = (ex_row.get("column") or "").strip()
+            if tbl == table and col:
+                fields.add(col)
+    return fields
 
 
 def compare_schema_rows(
@@ -1139,8 +1154,33 @@ def get_recommended_action(row: dict[str, Any], was_queried: bool) -> str:
 def print_analysis_summary(
     queried_rows: list[dict[str, Any]],
     type_mismatch_rows: list[dict[str, Any]] | None = None,
+    excluded_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     from rich.table import Table
+
+    UI_CONSOLE.print()
+
+    # --- Grey: excluded columns (shown first) ---
+    if excluded_rows:
+        ex_table = Table(show_header=True, header_style="bold white", border_style="white", show_lines=True)
+        ex_table.add_column("#", justify="right", style="dim", no_wrap=True)
+        ex_table.add_column("Column Name", style="white", no_wrap=True)
+        ex_table.add_column("Status", style="dim", no_wrap=True)
+        ex_table.add_column("SRC Type", style="dim", no_wrap=True)
+        ex_table.add_column("BCV Type", style="dim", no_wrap=True)
+        for i, row in enumerate(excluded_rows, 1):
+            ex_table.add_row(
+                str(i),
+                str(row.get("src_field", "")),
+                str(row.get("status", "")),
+                str(row.get("src_type", "")),
+                str(row.get("bcv_type", "")),
+            )
+        UI_CONSOLE.print(Panel(
+            ex_table,
+            title=f"[bold white]Excluded Columns (skipped from analysis & validation) — {len(excluded_rows)} column(s)[/bold white]",
+            border_style="white",
+        ))
 
     # All queried_rows already satisfy is_missing_bcv_column
     recommended = [
@@ -1312,6 +1352,13 @@ def main(
     write_rows_as_json_file(src_output_rows, selected_table)
     write_rows_as_json_file(bcv_output_rows, f"bcv_{selected_table}")
     comparison_rows = compare_schema_rows(selected_table, src_output_rows, bcv_output_rows, field_sizes)
+    # ── Exclude configured columns ────────────────────────────────────────────
+    excluded_fields = load_excluded_fields(selected_table, EXCLUDE_FIELDS_PATH)
+    excluded_rows = [row for row in comparison_rows if row.get("src_field") in excluded_fields]
+    comparison_rows = [row for row in comparison_rows if row.get("src_field") not in excluded_fields]
+    if excluded_fields:
+        log_info(f"Excluding {len(excluded_rows)} column(s) configured in exclude.csv")
+    # ─────────────────────────────────────────────────────────────────────────
     add_etl_usage_info(selected_table, comparison_rows, ETL_FIELDS_PATH)
     add_sos_usage_info(selected_table, comparison_rows, SOS_FIELDS_PATH)
     comparison_rows, queried_rows = add_usage_info(selected_table, comparison_rows, src_connection_kwargs)
@@ -1327,7 +1374,7 @@ def main(
         was_queried = is_missing_bcv_column(row) and str(row.get("src_field")) in queried_fields
         row["recommended_action"] = get_recommended_action(row, was_queried)
     type_mismatch_rows = [row for row in comparison_rows if is_type_mismatch(row)]
-    print_analysis_summary(summary_rows, type_mismatch_rows=type_mismatch_rows)
+    print_analysis_summary(summary_rows, type_mismatch_rows=type_mismatch_rows, excluded_rows=excluded_rows or None)
     result_filename = f"{selected_table}_result.csv"
     write_rows_as_csv_file(
         comparison_rows,

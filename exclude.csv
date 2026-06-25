@@ -1,0 +1,7 @@
+table,column
+request,__path__
+slot,__path__
+ad,__path__
+candidate,__path__
+auction,__path__
+ack,__path__
