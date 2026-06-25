@@ -24,6 +24,15 @@ A command-line tool for analyzing schema differences between the **SRC** (source
 - [Output](#output)
   - [`<table>_result.csv`](#table_resultcsv)
   - [JSON Files](#json-files)
+- [Matched Column Value Validation](#matched-column-value-validation)
+  - [Triggering Validation](#triggering-validation)
+  - [Network ID Filter](#network-id-filter)
+  - [Per-Table Join Keys](#per-table-join-keys)
+  - [Parent Structure Node Exclusion](#parent-structure-node-exclusion)
+  - [Batching Strategy](#batching-strategy)
+  - [Comparison Logic](#comparison-logic)
+  - [Validation Summary Output](#validation-summary-output)
+  - [Validation Output Files](#validation-output-files)
 - [Supported Tables](#supported-tables)
 - [Thresholds Reference](#thresholds-reference)
 
@@ -36,7 +45,12 @@ BCV Analyzer compares the schema of a source table (`mrm_log_flat.default.<table
 ```
 SRC Table  ──┐
              ├──► Schema Comparison ──► DIFF Columns ──► ETL Usage Check ──► Presto Usage Query ──► Analysis Summary + <table>_result.csv
-BCV Table  ──┘                                                                  (batch, 100/query)
+BCV Table  ──┘                                                                  (batch, 500/query)
+                                                                                        │
+                                                                                        ▼
+                                                                           Value Validation (MATCHED columns)
+                                                                           ──► <table>_validation_report.md
+                                                                           ──► <table>_result.csv  (validation column)
 ```
 
 ---
@@ -56,9 +70,10 @@ BCV/
 │   ├── auction_raw_size_in_TiB.xlsx
 │   └── ack_raw_size_in_TiB.xlsx
 ├── output/                  # Generated output (auto-created)
-│   ├── <table>_result.csv   # Main analysis result
-│   ├── <table>.json         # SRC column list
-│   └── bcv_<table>.json     # BCV column list
+│   ├── <table>_result.csv             # Main analysis result (+ validation column after validation)
+│   ├── <table>_validation_report.md  # Detailed value validation report
+│   ├── <table>.json                  # SRC column list
+│   └── bcv_<table>.json              # BCV column list
 └── tests/
     └── test_bcv_analyzer.py
 ```
@@ -137,7 +152,7 @@ python bcv_analyzer.py
 
 You will be prompted to:
 1. **Select a table** — choose from the supported tables using ↑/↓ arrow keys
-2. **Select a run mode** — Trial or Full Run (see [Run Modes](#run-modes))
+2. **Select a run mode** — Full Run or Validation Only (see [Run Modes](#run-modes))
 
 ### CLI Arguments
 
@@ -176,12 +191,11 @@ PRESTO_HOST=presto.example.com PRESTO_USER=alice python bcv_analyzer.py --table 
 
 When prompted, select one of two run modes:
 
-| Mode         | Description                                              |
-|--------------|----------------------------------------------------------|
-| **Trial**    | Queries Presto for the **first 10** DIFF columns only. Useful for quickly testing connectivity and validating results before a full run. |
-| **Full Run** | Queries Presto for **all** DIFF columns. May take significantly longer depending on the number of missing columns. |
+| Mode                | Description |
+|---------------------|-------------|
+| **Full Run**        | Queries Presto for **all** DIFF columns. |
+| **Validation Only** | Skips schema comparison and usage analysis entirely. Reads the previously generated `output/<table>_result.csv` and proceeds directly to [Matched Column Value Validation](#matched-column-value-validation). Requires a result CSV to already exist. |
 
-> **Note:** In Trial mode, columns beyond the first 10 will have no Presto usage data. ETL usage is still checked before Presto usage, so ETL-used columns can still receive a `recommended_action`.
 
 ---
 
@@ -232,7 +246,7 @@ The tool then queries the Presto internal usage tracking tables to find how many
 | `LQS`      | Queries from LQS-based sources                                              |
 | `Others`   | All other query sources                                                     |
 
-**Batching:** Columns are queried in batches of **100** per Presto query (configurable via `USAGE_QUERY_BATCH_SIZE`) to minimize query overhead.
+**Batching:** Columns are queried in batches of **500** per Presto query (configurable via `USAGE_QUERY_BATCH_SIZE`) to minimize query overhead.
 
 **Retry:** Each batch query is retried up to **3 times** on failure (configurable via `USAGE_QUERY_MAX_RETRIES`).
 
@@ -244,7 +258,7 @@ The tool then queries the Presto internal usage tracking tables to find how many
 
 ### 4. Analysis Summary
 
-After querying usage data, the tool prints a color-coded **Analysis Summary** with three panels:
+After querying usage data, the tool prints a color-coded **Analysis Summary** with three panels.
 
 ---
 
@@ -292,6 +306,7 @@ Written to `output/<table>_result.csv`. Contains one row per column comparison w
 | `usage:LQS`          | Number of distinct LQS queries using this column             |
 | `usage:Others`       | Number of distinct queries from other sources                |
 | `recommended_action` | `Backfill` / `Excluded - Size Too Large` / `No Backfill - Low Usage` / _(empty)_ |
+| `validation`         | Added after value validation: `Y` (values match), `N` (mismatch), `-` (parent structure node, skipped), or empty (not a MATCHED column) |
 
 ### JSON Files
 
@@ -304,16 +319,173 @@ Written to `output/`:
 
 ---
 
+## Matched Column Value Validation
+
+After the schema comparison and usage analysis, the tool validates the **actual data values** of all MATCHED columns by running live queries against both SRC and BCV and comparing row by row.
+
+### Triggering Validation
+
+Validation is triggered in two ways:
+
+1. **After a Full Run** — once `output/<table>_result.csv` is written, the tool prompts:
+   > `Continue to validate values for MATCHED columns?`
+   Selecting `Yes` starts validation immediately.
+
+2. **Validation Only mode** — select this run mode at startup to skip schema comparison entirely and jump straight to validation using a previously generated result CSV.
+
+### Network ID Filter
+
+Both SRC and BCV queries include a fixed network ID filter to scope results to a known network:
+
+```sql
+AND request__context__video_cro_network_id = 169843
+```
+
+The value `169843` is an **integer** literal (not a quoted string). This filter is applied to every query in every validation batch.
+
+### Per-Table Join Keys
+
+SRC and BCV rows are joined on a set of key columns configured per table. Integer key columns are emitted as unquoted integer literals in `IN (...)` clauses.
+
+| Table     | Key Columns                                                                                   |
+|-----------|-----------------------------------------------------------------------------------------------|
+| `request` | `request__transaction_id`                                                                     |
+| `slot`    | `request__transaction_id`, `slot__index` _(int)_                                              |
+| `ad`      | `request__transaction_id`, `advertisement__ad_id` _(int)_, `advertisement__ad_replica_id` _(int)_ |
+
+Tables without a configured key (`candidate`, `auction`, `ack`) will skip value validation with a warning message.
+
+### Parent Structure Node Exclusion
+
+Certain MATCHED columns are structural containers rather than leaf values and are automatically excluded from comparison. A column is treated as a **parent structure node** when **both** of the following conditions hold simultaneously:
+
+1. Its `src_type` is one of:
+   - `varchar`
+   - `array(varchar)`
+   - `array(array(varchar))`
+   - `array(array(array(varchar)))`
+
+2. At least one child column named `<field>__<suffix>` exists anywhere in the result CSV.
+
+   _Example: `visitor__postal_code_package` has type `array(varchar)` and a child column `visitor__postal_code_package__network_id` exists → it is a parent node._
+
+Parent nodes are:
+- **Excluded** from validation queries — no SQL is generated for them.
+- Marked **`-`** in the `validation` column of `result.csv`.
+- Listed in a dedicated **"Excluded Parent Structure Nodes"** section of the validation report markdown.
+
+### Batching Strategy
+
+Validation queries are split into batches of up to **500 columns** each (configurable via `VALUE_VALIDATION_BATCH_SIZE`). Key columns are automatically prepended to any batch that does not already include them.
+
+**Batch 1 — anchor batch (TABLESAMPLE):**
+
+```sql
+SELECT
+    <key_columns>,
+    <matched_columns_batch_1>
+FROM mrm_log_flat.default.<table> TABLESAMPLE BERNOULLI (1)
+WHERE bitwise_and(request__bit_flags, 576460752303423488) > 0
+  AND process_batch_id = '<batch_id>'
+  AND request__context__video_cro_network_id = 169843
+LIMIT 10
+```
+
+- `batch_id` = current time minus 24 hours, rounded to the hour (`YYYYMMDDHHMMSS`, e.g. `20260624140000`). Displayed in **green** in the terminal.
+- Up to 10 rows are sampled. The key values from these rows are carried forward to all subsequent batches.
+
+**Batch 2+ — key-targeted batches (SRC):**
+
+```sql
+SELECT
+    <key_columns>,
+    <matched_columns_batch_N>
+FROM mrm_log_flat.default.<table>
+WHERE process_batch_id = '<batch_id>'
+  AND (<key_columns>) IN ((<v1>, <v2>), ...)
+  AND request__context__video_cro_network_id = 169843
+```
+
+**BCV query (all batches):**
+
+```sql
+SELECT
+    <key_columns>,
+    <matched_columns_batch_N>
+FROM etl.public_test1.<table>
+WHERE batch_id = '<batch_id>'
+  AND (<key_columns>) IN ((<v1>, <v2>), ...)
+  AND request__context__video_cro_network_id = 169843
+LIMIT 10
+```
+
+All batches are executed sequentially. Progress is shown with a live spinning indicator that refreshes every second:
+
+```
+[2026-06-25 10:30:05] Executing value validation batch 2/4 — SRC |
+```
+
+Results from all batches are merged in memory before the final comparison.
+
+### Comparison Logic
+
+1. SRC rows from batch 1 establish the universe of transaction keys.
+2. Only rows whose key exists in **both** SRC and BCV are compared; unmatched keys are skipped.
+3. For every compared row, each non-key column is compared as a string.
+4. A column is **matched** (`Y`) if its value is identical across all compared rows; otherwise **unmatched** (`N`).
+
+### Validation Summary Output
+
+The terminal prints a summary with highlighted counts, e.g.:
+
+```
+[2026-06-25 10:31:00] Value validation summary:
+[2026-06-25 10:31:00] Matched transactions:  10/10
+[2026-06-25 10:31:00] Matched fields:       342/350  (97.71%)
+[2026-06-25 10:31:00] Unmatched fields:       8/350   (2.29%)
+```
+
+### Validation Output Files
+
+Two files are written/updated after validation. Both paths are printed in **green** in the terminal.
+
+| File | Description |
+|------|-------------|
+| `output/<table>_result.csv` | Existing result CSV patched with a new `validation` column (`Y` / `N` / `-`) |
+| `output/<table>_validation_report.md` | Detailed markdown report (see below) |
+
+#### `<table>_validation_report.md`
+
+| Section | Contents |
+|---------|----------|
+| **Summary** | Transaction counts and matched/unmatched field counts with percentages |
+| **Excluded Parent Structure Nodes** | Fields skipped as parent nodes, with their types |
+| **SQL Queries** | All SRC and BCV SQL for every batch, as fenced code blocks (for deep debugging) |
+| **Unmatched Field Details** | Per-column diff table: join key, SRC value, BCV value for every differing row |
+
+Example unmatched field entry in the report:
+
+```markdown
+### 1. `slot__environment`  _(3 diff(s))_
+
+| Key | SRC | BCV |
+|:---|:---|:---|
+| `abc123 / 1` | `web`  | `WEB`    |
+| `def456 / 2` | `app`  | *(null)* |
+```
+
+---
+
 ## Supported Tables
 
-| Table       | SRC Full Name                        | BCV Full Name                     |
-|-------------|--------------------------------------|-----------------------------------|
-| `request`   | `mrm_log_flat.default.request`       | `etl.public_test1.request`        |
-| `ad`        | `mrm_log_flat.default.ad`            | `etl.public_test1.ad`             |
-| `slot`      | `mrm_log_flat.default.slot`          | `etl.public_test1.slot`           |
-| `candidate` | `mrm_log_flat.default.candidate`     | `etl.public_test1.candidate`      |
-| `auction`   | `mrm_log_flat.default.auction`       | `etl.public_test1.auction`        |
-| `ack`       | `mrm_log_flat.default.ack`           | `etl.public_test1.ack`            |
+| Table       | SRC Full Name                        | BCV Full Name                     | Validation Key Columns |
+|-------------|--------------------------------------|-----------------------------------|------------------------|
+| `request`   | `mrm_log_flat.default.request`       | `etl.public_test1.request`        | `request__transaction_id` |
+| `ad`        | `mrm_log_flat.default.ad`            | `etl.public_test1.ad`             | `request__transaction_id`, `advertisement__ad_id`, `advertisement__ad_replica_id` |
+| `slot`      | `mrm_log_flat.default.slot`          | `etl.public_test1.slot`           | `request__transaction_id`, `slot__index` |
+| `candidate` | `mrm_log_flat.default.candidate`     | `etl.public_test1.candidate`      | _(not configured — validation skipped)_ |
+| `auction`   | `mrm_log_flat.default.auction`       | `etl.public_test1.auction`        | _(not configured — validation skipped)_ |
+| `ack`       | `mrm_log_flat.default.ack`           | `etl.public_test1.ack`            | _(not configured — validation skipped)_ |
 
 ---
 
@@ -321,9 +493,9 @@ Written to `output/`:
 
 All thresholds are defined as constants at the top of `bcv_analyzer.py` for easy adjustment:
 
-| Constant                  | Value  | Description                                     |
-|---------------------------|--------|-------------------------------------------------|
-| `USAGE_QUERY_LIMIT`       | `10`   | Number of columns queried in Trial mode         |
-| `USAGE_QUERY_BATCH_SIZE`  | `100`  | Columns per Presto batch query                  |
-| `USAGE_QUERY_MAX_RETRIES` | `3`    | Max retry attempts per batch on failure         |
-
+| Constant                        | Value    | Description                                         |
+|---------------------------------|----------|-----------------------------------------------------|
+| `USAGE_QUERY_BATCH_SIZE`        | `500`    | Columns per Presto usage batch query                |
+| `USAGE_QUERY_MAX_RETRIES`       | `3`      | Max retry attempts per usage batch on failure       |
+| `VALUE_VALIDATION_BATCH_SIZE`   | `500`    | Columns per value validation batch query            |
+| `VALUE_VALIDATION_NETWORK_ID`   | `169843` | Network ID filter applied to all validation queries |

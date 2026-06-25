@@ -5,7 +5,7 @@ import json
 import os
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Any, Callable
@@ -30,14 +30,32 @@ FIELD_SIZE_DIR = _SCRIPT_DIR / "field_size"
 ETL_FIELDS_PATH = _SCRIPT_DIR / "etl_fields.json"
 APP_VERSION = "v0.1"
 USAGE_COLUMNS = ("usage:ETL", "usage:Insights", "usage:Arena", "usage:LQS", "usage:Others")
-USAGE_QUERY_LIMIT = 10
-USAGE_QUERY_BATCH_SIZE = 100
+USAGE_QUERY_BATCH_SIZE = 500
 USAGE_QUERY_MAX_RETRIES = 3
+VALUE_VALIDATION_BATCH_SIZE = 500
+VALUE_VALIDATION_NETWORK_ID_COLUMN = "request__context__video_cro_network_id"
+VALUE_VALIDATION_NETWORK_ID = 169843
+# Key columns used to join SRC and BCV rows, configured per table.
+# For tables not listed here, value validation is skipped.
+TABLE_KEY_COLUMNS: dict[str, list[str]] = {
+    "request": ["request__transaction_id"],
+    "slot": ["request__transaction_id", "slot__index"],
+    "ad": ["request__transaction_id", "advertisement__ad_id", "advertisement__ad_replica_id"],
+    # "candidate": [],  # TODO: to be configured
+    # "auction":   [],  # TODO: to be configured
+    # "ack":       [],  # TODO: to be configured
+}
+# Columns whose SQL literal must be unquoted (int). All others default to quoted string.
+TABLE_KEY_COLUMN_TYPES: dict[str, str] = {
+    "slot__index": "int",
+    "advertisement__ad_id": "int",
+    "advertisement__ad_replica_id": "int",
+}
 
 
 class RunMode(str, Enum):
-    TRIAL = "Trial"
     FULL_RUN = "Full Run"
+    VALIDATION_ONLY = "Validation Only"
 
 
 APP_BANNER = r"""
@@ -344,13 +362,12 @@ def add_usage_info(
     table: str,
     rows: list[dict[str, Any]],
     connection_kwargs: dict[str, Any],
-    limit: int = USAGE_QUERY_LIMIT,
 ) -> list[dict[str, Any]]:
     for row in rows:
         for column in USAGE_COLUMNS:
             row.setdefault(column, "")
 
-    missing_rows = [row for row in rows if is_missing_bcv_column(row)][:limit]
+    missing_rows = [row for row in rows if is_missing_bcv_column(row)]
     total = len(missing_rows)
     if total == 0:
         return rows
@@ -458,6 +475,498 @@ def write_rows_as_csv_file(rows: list[dict[str, Any]], filename: str, fieldnames
         writer.writerows(rows)
 
 
+def build_value_validation_batch_id(now: datetime | None = None) -> str:
+    batch_time = (now or datetime.now()) - timedelta(hours=24)
+    return batch_time.replace(minute=0, second=0, microsecond=0).strftime("%Y%m%d%H%M%S")
+
+
+def load_matched_columns_from_result_csv(result_path: Path) -> list[str]:
+    with result_path.open(encoding="utf-8", newline="") as result_file:
+        return [
+            row["src_field"]
+            for row in csv.DictReader(result_file)
+            if row.get("status") == "MATCHED" and row.get("src_field")
+        ]
+
+
+# src_type values that indicate a nested array-of-string parent structure node
+PARENT_STRUCTURE_TYPES: frozenset[str] = frozenset({
+    "varchar",
+    "array(varchar)",
+    "array(array(varchar))",
+    "array(array(array(varchar)))",
+})
+
+
+def identify_parent_structure_nodes(result_path: Path) -> dict[str, str]:
+    """Return a mapping of src_field → src_type for parent structure nodes.
+
+    Both conditions must hold:
+    1. src_type is one of PARENT_STRUCTURE_TYPES
+    2. At least one child column ({src_field}__*) exists anywhere in the CSV
+    """
+    with result_path.open(encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+
+    all_src_fields = {row.get("src_field", "") for row in rows if row.get("src_field")}
+
+    parent_nodes: dict[str, str] = {}
+    for row in rows:
+        src_field = row.get("src_field", "")
+        src_type = (row.get("src_type") or "").lower().strip()
+        if not src_field or src_type not in PARENT_STRUCTURE_TYPES:
+            continue
+        if any(f.startswith(f"{src_field}__") for f in all_src_fields):
+            parent_nodes[src_field] = src_type
+    return parent_nodes
+
+
+def get_table_key_columns(table: str) -> list[str]:
+    return TABLE_KEY_COLUMNS.get(table, [])
+
+
+def extract_row_key(row: dict[str, Any], key_columns: list[str]) -> tuple:
+    return tuple(get_case_insensitive(row, col) for col in key_columns)
+
+
+def format_row_key(key: tuple) -> str:
+    return " / ".join(str(v) for v in key)
+
+
+def build_key_in_clause(key_columns: list[str], keys: list[tuple]) -> str:
+    """Build a SQL IN predicate for one or more key columns."""
+    def _fmt(col: str, value: Any) -> str:
+        if TABLE_KEY_COLUMN_TYPES.get(col) == "int":
+            return str(int(value))
+        return sql_literal(str(value))
+
+    if len(key_columns) == 1:
+        col = key_columns[0]
+        key_list = ",\n".join(f"      {_fmt(col, k[0])}" for k in keys)
+        return f"{col} IN (\n{key_list}\n  )"
+    col_tuple = "(" + ", ".join(key_columns) + ")"
+    key_rows = ",\n".join(
+        "      (" + ", ".join(_fmt(col, v) for col, v in zip(key_columns, k)) + ")"
+        for k in keys
+    )
+    return f"{col_tuple} IN (\n{key_rows}\n  )"
+
+
+def get_row_keys(rows: list[dict[str, Any]], key_columns: list[str]) -> list[tuple]:
+    keys = []
+    for row in rows:
+        key = extract_row_key(row, key_columns)
+        if all(v is not None and v != "" for v in key):
+            keys.append(key)
+    return keys
+
+
+def build_value_validation_sql_batches(
+    table: str,
+    columns: list[str],
+    batch_id: str,
+    key_columns: list[str],
+    batch_size: int = VALUE_VALIDATION_BATCH_SIZE,
+) -> list[dict[str, Any]]:
+    sql_batches = []
+    for batch_start in range(0, len(columns), batch_size):
+        batch_columns = columns[batch_start:batch_start + batch_size]
+        # Always include all key columns so every batch can be joined
+        missing_keys = [k for k in key_columns if k not in batch_columns]
+        if missing_keys:
+            batch_columns = missing_keys + batch_columns
+        select_list = ",\n".join(f"    {column}" for column in batch_columns)
+        src_sql = (
+            "SELECT\n"
+            f"{select_list}\n"
+            f"FROM {build_full_table_name(table)} TABLESAMPLE BERNOULLI (1)\n"
+            f"WHERE bitwise_and(request__bit_flags, 576460752303423488) > 0\n"
+            f"  AND process_batch_id = {sql_literal(batch_id)}\n"
+            f"  AND {VALUE_VALIDATION_NETWORK_ID_COLUMN} = {VALUE_VALIDATION_NETWORK_ID}\n"
+            f"LIMIT 10"
+        )
+        sql_batches.append({"src_sql": src_sql, "columns": batch_columns})
+    return sql_batches
+
+
+def build_value_validation_bcv_sql(
+    table: str,
+    columns: list[str],
+    batch_id: str,
+    key_columns: list[str],
+    keys: list[tuple],
+) -> str:
+    select_list = ",\n".join(f"    {column}" for column in columns)
+    key_clause = build_key_in_clause(key_columns, keys)
+    return (
+        "SELECT\n"
+        f"{select_list}\n"
+        f"FROM {build_bcv_table_name(table)}\n"
+        f"WHERE batch_id = {sql_literal(batch_id)}\n"
+        f"  AND {key_clause}\n"
+        f"  AND {VALUE_VALIDATION_NETWORK_ID_COLUMN} = {VALUE_VALIDATION_NETWORK_ID}\n"
+        f"LIMIT 10"
+    )
+
+
+def build_value_validation_src_sql_by_keys(
+    table: str,
+    columns: list[str],
+    batch_id: str,
+    key_columns: list[str],
+    keys: list[tuple],
+) -> str:
+    """SRC SQL for batch 2+: target the same rows sampled in batch 1."""
+    select_list = ",\n".join(f"    {column}" for column in columns)
+    key_clause = build_key_in_clause(key_columns, keys)
+    return (
+        "SELECT\n"
+        f"{select_list}\n"
+        f"FROM {build_full_table_name(table)}\n"
+        f"WHERE process_batch_id = {sql_literal(batch_id)}\n"
+        f"  AND {key_clause}\n"
+        f"  AND {VALUE_VALIDATION_NETWORK_ID_COLUMN} = {VALUE_VALIDATION_NETWORK_ID}\n"
+    )
+
+
+
+def compare_value_validation_results(
+    src_rows: list[dict[str, Any]],
+    bcv_rows: list[dict[str, Any]],
+    columns: list[str],
+    key_columns: list[str],
+) -> dict[str, Any]:
+    key_set = set(key_columns)
+    value_columns = [column for column in columns if column not in key_set]
+    bcv_by_key: dict[tuple, dict[str, Any]] = {
+        extract_row_key(row, key_columns): row for row in bcv_rows
+    }
+    # field_diffs: field → list of {key, src, bcv} for every differing row
+    field_diffs: dict[str, list[dict[str, Any]]] = {}
+    matched_transaction_count = 0
+
+    for src_row in src_rows:
+        key = extract_row_key(src_row, key_columns)
+        key_display = format_row_key(key)
+        bcv_row = bcv_by_key.get(key)
+        if bcv_row is None:
+            continue
+        matched_transaction_count += 1
+        for column in value_columns:
+            src_value = get_case_insensitive(src_row, column)
+            bcv_value = get_case_insensitive(bcv_row or {}, column)
+            if src_value != bcv_value:
+                field_diffs.setdefault(column, []).append({
+                    "key": key_display,
+                    "src": src_value,
+                    "bcv": bcv_value,
+                })
+
+    # preserve original column order
+    matched_fields = [c for c in value_columns if c not in field_diffs]
+    mismatched_field_list = [c for c in value_columns if c in field_diffs]
+    total_field_count = len(value_columns)
+    matched_field_count = len(matched_fields)
+    mismatched_field_count = len(mismatched_field_list)
+    return {
+        "total_transaction_count": len(src_rows),
+        "matched_transaction_count": matched_transaction_count,
+        "matched_fields": matched_fields,
+        "mismatched_fields": mismatched_field_list,
+        "field_diffs": field_diffs,
+        "total_field_count": total_field_count,
+        "matched_field_count": matched_field_count,
+        "mismatched_field_count": mismatched_field_count,
+        "matched_field_ratio": (matched_field_count / total_field_count * 100) if total_field_count else 0,
+        "mismatched_field_ratio": (mismatched_field_count / total_field_count * 100) if total_field_count else 0,
+    }
+
+
+def print_value_validation_summary(summary: dict[str, Any]) -> None:
+    matched_tx = summary["matched_transaction_count"]
+    total_tx = summary["total_transaction_count"]
+    matched_f = summary["matched_field_count"]
+    mismatched_f = summary["mismatched_field_count"]
+    total_f = summary["total_field_count"]
+    matched_ratio = summary["matched_field_ratio"]
+    mismatched_ratio = summary["mismatched_field_ratio"]
+    diff_color = "red" if mismatched_f > 0 else "green"
+
+    print()
+    log_info("Value validation summary:")
+    UI_CONSOLE.print(
+        f"[{current_timestamp()}] Matched transactions:"
+        f" [bold green]{matched_tx}[/bold green]/[bold]{total_tx}[/bold]"
+    )
+    UI_CONSOLE.print(
+        f"[{current_timestamp()}] Matched fields:"
+        f" [bold green]{matched_f}[/bold green]/[bold]{total_f}[/bold]"
+        f" ([green]{matched_ratio:.2f}%[/green])"
+    )
+    UI_CONSOLE.print(
+        f"[{current_timestamp()}] Unmatched fields:"
+        f" [bold {diff_color}]{mismatched_f}[/bold {diff_color}]/[bold]{total_f}[/bold]"
+        f" ([{diff_color}]{mismatched_ratio:.2f}%[/{diff_color}])"
+    )
+
+
+def _md_cell(value: Any) -> str:
+    """Format a single markdown table cell value."""
+    if value is None or value == "":
+        return "*(null)*"
+    return "`" + str(value).replace("`", "'").replace("|", "\\|") + "`"
+
+
+def write_value_validation_report_md(
+    table: str,
+    summary: dict[str, Any],
+    sql_sections: list[str] | None = None,
+    now: datetime | None = None,
+    parent_nodes: dict[str, str] | None = None,
+) -> Path:
+    timestamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    field_diffs: dict[str, list[dict[str, Any]]] = summary.get("field_diffs", {})
+    mismatched_fields: list[str] = summary["mismatched_fields"]
+
+    lines: list[str] = [
+        f"# Value Validation Report — {table} — {timestamp}",
+        "",
+        "## Summary",
+        "",
+        "| Metric | Count | Ratio |",
+        "|:---|---:|---:|",
+        f"| SRC Transactions | {summary['total_transaction_count']} | |",
+        f"| Matched Transactions (SRC ∩ BCV) | {summary['matched_transaction_count']}"
+        f" | {summary['matched_transaction_count'] / summary['total_transaction_count'] * 100:.1f}%"
+        f" |" if summary["total_transaction_count"] else
+        f"| Matched Transactions (SRC ∩ BCV) | {summary['matched_transaction_count']} | |",
+        f"| Total Fields | {summary['total_field_count']} | |",
+        f"| Matched Fields | {summary['matched_field_count']}"
+        f" | {summary['matched_field_ratio']:.1f}% |",
+        f"| **Unmatched Fields** | **{summary['mismatched_field_count']}**"
+        f" | **{summary['mismatched_field_ratio']:.1f}%** |",
+        "",
+    ]
+
+    # ── Excluded Parent Structure Nodes ──────────────────────────────────────
+    if parent_nodes:
+        lines += [
+            "## Excluded Parent Structure Nodes",
+            "",
+            f"The following **{len(parent_nodes)}** field(s) were skipped during value"
+            " validation because they are parent structure nodes"
+            " (type matches a structural type **and** at least one child column exists).",
+            "",
+            "| # | Field | Type |",
+            "|---:|:---|:---|",
+        ]
+        for idx, (field, ftype) in enumerate(sorted(parent_nodes.items()), 1):
+            lines.append(f"| {idx} | `{field}` | `{ftype}` |")
+        lines.append("")
+
+    # ── SQL Queries ──────────────────────────────────────────────────────────
+    if sql_sections:
+        lines += ["## SQL Queries", ""]
+        for section in sql_sections:
+            lines += [section, ""]
+
+    # ── Unmatched Field Details ───────────────────────────────────────────────
+    if not field_diffs:
+        lines += ["## Unmatched Field Details", "", "✅ No field mismatches found.", ""]
+    else:
+        lines += ["## Unmatched Field Details", ""]
+        for idx, field in enumerate(mismatched_fields, 1):
+            diffs = field_diffs.get(field, [])
+            lines += [
+                f"### {idx}. `{field}`  _({len(diffs)} diff(s))_",
+                "",
+                "| Key | SRC | BCV |",
+                "|:---|:---|:---|",
+            ]
+            for diff in diffs:
+                tid = _md_cell(diff["key"])
+                src = _md_cell(diff["src"])
+                bcv = _md_cell(diff["bcv"])
+                lines.append(f"| {tid} | {src} | {bcv} |")
+            lines.append("")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = OUTPUT_DIR / f"{table}_validation_report.md"
+    report_path.write_text("\n".join(lines), encoding="utf-8")
+    return report_path
+
+
+def update_result_csv_with_validation(
+    result_path: Path,
+    summary: dict[str, Any],
+    parent_nodes: set[str],
+) -> None:
+    """Patch a 'validation' column (Y/N/-) into the existing result CSV."""
+    matched_set = set(summary["matched_fields"])
+    mismatched_set = set(summary["mismatched_fields"])
+
+    with result_path.open(encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = list(reader.fieldnames or [])
+
+    if "validation" not in fieldnames:
+        fieldnames = fieldnames + ["validation"]
+
+    for row in rows:
+        if row.get("status") == "MATCHED":
+            src_field = row.get("src_field", "")
+            if src_field in parent_nodes:
+                row["validation"] = "-"
+            elif src_field in mismatched_set:
+                row["validation"] = "N"
+            elif src_field in matched_set:
+                row["validation"] = "Y"
+            else:
+                row["validation"] = ""
+        else:
+            row.setdefault("validation", "")
+
+    with result_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def prompt_for_value_validation() -> bool:
+    selected = questionary.confirm("Continue to validate values for MATCHED columns?").ask()
+    return bool(selected)
+
+
+def print_value_validation_sql(
+    table: str,
+    result_path: Path,
+    src_connection_kwargs: dict[str, Any],
+    bcv_connection_kwargs: dict[str, Any],
+    now: datetime | None = None,
+    batch_size: int = VALUE_VALIDATION_BATCH_SIZE,
+) -> None:
+    matched_columns = load_matched_columns_from_result_csv(result_path)
+    if not matched_columns:
+        log_info("No MATCHED columns found for value validation.")
+        return
+
+    # Identify and skip parent structure nodes
+    parent_nodes = identify_parent_structure_nodes(result_path)
+    if parent_nodes:
+        log_info(
+            f"Skipping {len(parent_nodes)} parent structure node(s) from validation"
+            f" (will be marked '-' in result CSV)"
+        )
+        matched_columns = [c for c in matched_columns if c not in parent_nodes]
+    if not matched_columns:
+        log_info("No columns left to validate after excluding parent structure nodes.")
+        update_result_csv_with_validation(result_path, {
+            "matched_fields": [], "mismatched_fields": [],
+        }, parent_nodes)
+        return
+
+    key_columns = get_table_key_columns(table)
+    if not key_columns:
+        log_info(f"No key columns configured for table '{table}'. Skipping value validation.")
+        return
+
+    batch_id = build_value_validation_batch_id(now)
+    sql_batches = build_value_validation_sql_batches(
+        table, matched_columns, batch_id, key_columns, batch_size=batch_size,
+    )
+    num_batches = len(sql_batches)
+    UI_CONSOLE.print(
+        f"[{current_timestamp()}] Value validation batch_id:"
+        f" [bold green]{batch_id}[/bold green]"
+        f"  (executing all {num_batches} batch(es))"
+    )
+
+    # ── Batch 1: TABLESAMPLE — anchors the key set ────────────────────────────
+    batch0 = sql_batches[0]
+    with spinning_cursor(f"Executing value validation batch 1/{num_batches} — SRC"):
+        src_rows_0 = execute_sql(batch0["src_sql"], connection_kwargs=src_connection_kwargs)
+
+    keys = get_row_keys(src_rows_0, key_columns)
+    if not keys:
+        log_info(
+            f"No key values ({', '.join(key_columns)}) returned from SRC query. Skipping BCV query."
+        )
+        return
+
+    bcv_sql_0 = build_value_validation_bcv_sql(
+        table, batch0["columns"], batch_id, key_columns, keys,
+    )
+    with spinning_cursor(f"Executing value validation batch 1/{num_batches} — BCV"):
+        bcv_rows_0 = execute_sql(bcv_sql_0, connection_kwargs=bcv_connection_kwargs)
+
+    # Accumulators keyed by the composite row key tuple
+    src_by_key: dict[tuple, dict[str, Any]] = {
+        extract_row_key(r, key_columns): dict(r) for r in src_rows_0
+    }
+    bcv_by_key: dict[tuple, dict[str, Any]] = {
+        extract_row_key(r, key_columns): dict(r) for r in bcv_rows_0
+    }
+    seen_columns: set[str] = set(batch0["columns"])
+    all_columns: list[str] = list(batch0["columns"])
+    sql_sections = [
+        f"### Batch 1/{num_batches} — SRC (TABLESAMPLE)\n\n```sql\n{batch0['src_sql']}\n```",
+        f"### Batch 1/{num_batches} — BCV\n\n```sql\n{bcv_sql_0}\n```",
+    ]
+
+    # ── Batch 2+: target the same keys, pull remaining columns ────────────────
+    for batch_idx in range(1, num_batches):
+        batch_num = batch_idx + 1
+        batch = sql_batches[batch_idx]
+
+        src_sql_n = build_value_validation_src_sql_by_keys(
+            table, batch["columns"], batch_id, key_columns, keys,
+        )
+        with spinning_cursor(f"Executing value validation batch {batch_num}/{num_batches} — SRC"):
+            src_rows_n = execute_sql(src_sql_n, connection_kwargs=src_connection_kwargs)
+
+        bcv_sql_n = build_value_validation_bcv_sql(
+            table, batch["columns"], batch_id, key_columns, keys,
+        )
+        with spinning_cursor(f"Executing value validation batch {batch_num}/{num_batches} — BCV"):
+            bcv_rows_n = execute_sql(bcv_sql_n, connection_kwargs=bcv_connection_kwargs)
+
+        for row in src_rows_n:
+            k = extract_row_key(row, key_columns)
+            if k in src_by_key:
+                src_by_key[k].update(row)
+        for row in bcv_rows_n:
+            k = extract_row_key(row, key_columns)
+            if k in bcv_by_key:
+                bcv_by_key[k].update(row)
+        for col in batch["columns"]:
+            if col not in seen_columns:
+                all_columns.append(col)
+                seen_columns.add(col)
+        sql_sections += [
+            f"### Batch {batch_num}/{num_batches} — SRC\n\n```sql\n{src_sql_n}\n```",
+            f"### Batch {batch_num}/{num_batches} — BCV\n\n```sql\n{bcv_sql_n}\n```",
+        ]
+
+    # ── Compare merged results ─────────────────────────────────────────────────
+    summary = compare_value_validation_results(
+        list(src_by_key.values()), list(bcv_by_key.values()), all_columns, key_columns,
+    )
+    print_value_validation_summary(summary)
+
+    report_path = write_value_validation_report_md(
+        table, summary, sql_sections=sql_sections, parent_nodes=parent_nodes,
+    )
+    UI_CONSOLE.print(
+        f"[{current_timestamp()}] Validation report written to: [bold green]{report_path}[/bold green]"
+    )
+
+    update_result_csv_with_validation(result_path, summary, parent_nodes)
+    UI_CONSOLE.print(
+        f"[{current_timestamp()}] Result CSV updated with validation column: [bold green]{result_path}[/bold green]"
+    )
+
+
 def build_connection_kwargs(
     host: str,
     port: int,
@@ -518,12 +1027,12 @@ def resolve_run_mode() -> RunMode:
         "Select run mode:",
         choices=[
             questionary.Choice(
-                title=f"Trial  (query Presto for first {USAGE_QUERY_LIMIT} missing columns only)",
-                value=RunMode.TRIAL,
+                title="Full Run  (query Presto for ALL missing columns)",
+                value=RunMode.FULL_RUN,
             ),
             questionary.Choice(
-                title="Full Run  (query Presto for ALL missing columns, takes longer)",
-                value=RunMode.FULL_RUN,
+                title="Validation Only  (skip schema comparison, load existing result.csv and validate data values)",
+                value=RunMode.VALIDATION_ONLY,
             ),
         ],
     ).ask()
@@ -689,28 +1198,29 @@ def main(
     run_mode = resolve_run_mode()
     log_info(f"Run mode: {run_mode.value}")
     validate_connection_args(host, user)
-    src_table_name = build_full_table_name(selected_table)
-    bcv_table_name = build_bcv_table_name(selected_table)
     src_connection_kwargs = build_connection_kwargs(
-        host,
-        port,
-        user,
-        SRC_CATALOG,
-        SRC_SCHEMA,
-        request_timeout,
-        auth_token,
-        auth_header,
+        host, port, user, SRC_CATALOG, SRC_SCHEMA, request_timeout, auth_token, auth_header,
     )
     bcv_connection_kwargs = build_connection_kwargs(
-        host,
-        port,
-        user,
-        BCV_CATALOG,
-        BCV_SCHEMA,
-        request_timeout,
-        auth_token,
-        auth_header,
+        host, port, user, BCV_CATALOG, BCV_SCHEMA, request_timeout, auth_token, auth_header,
     )
+
+    # ── Validation Only: skip schema comparison & usage analysis ──────────────
+    if run_mode == RunMode.VALIDATION_ONLY:
+        result_filename = f"{selected_table}_result.csv"
+        result_path = (OUTPUT_DIR / result_filename).resolve()
+        if not result_path.exists():
+            raise SystemExit(
+                f"Result file not found: {result_path}\n"
+                "Please run a Full Run analysis first to generate the result CSV."
+            )
+        log_info(f"Loading existing result file: {result_path}")
+        print_value_validation_sql(selected_table, result_path, src_connection_kwargs, bcv_connection_kwargs)
+        return
+    # ──────────────────────────────────────────────────────────────────────────
+
+    src_table_name = build_full_table_name(selected_table)
+    bcv_table_name = build_bcv_table_name(selected_table)
     rows = retrieve_column_list(
         src_table_name,
         f"DESCRIBE {src_table_name}",
@@ -729,8 +1239,7 @@ def main(
     write_rows_as_json_file(bcv_output_rows, f"bcv_{selected_table}")
     comparison_rows = compare_schema_rows(selected_table, src_output_rows, bcv_output_rows, field_sizes)
     add_etl_usage_info(selected_table, comparison_rows, ETL_FIELDS_PATH)
-    usage_limit = USAGE_QUERY_LIMIT if run_mode == RunMode.TRIAL else sys.maxsize
-    comparison_rows, queried_rows = add_usage_info(selected_table, comparison_rows, src_connection_kwargs, limit=usage_limit)
+    comparison_rows, queried_rows = add_usage_info(selected_table, comparison_rows, src_connection_kwargs)
     queried_fields = {str(r["src_field"]) for r in queried_rows}
     summary_rows = list(queried_rows)
     summary_fields = set(queried_fields)
@@ -751,6 +1260,8 @@ def main(
     )
     result_path = (OUTPUT_DIR / result_filename).resolve()
     UI_CONSOLE.print(f"[{current_timestamp()}] Completed! results are written to [bold green]{result_path}[/bold green]")
+    if prompt_for_value_validation():
+        print_value_validation_sql(selected_table, result_path, src_connection_kwargs, bcv_connection_kwargs)
 
 
 if __name__ == "__main__":

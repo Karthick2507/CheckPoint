@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -142,6 +143,7 @@ class BcvAnalyzerTests(unittest.TestCase):
                     patch.object(bcv_analyzer, "OUTPUT_DIR", Path(tmpdir) / "output"),
                     patch.object(bcv_analyzer, "ETL_FIELDS_PATH", Path(tmpdir) / "missing_etl_fields.json"),
                     patch.object(bcv_analyzer, "resolve_run_mode", return_value=bcv_analyzer.RunMode.TRIAL),
+                    patch.object(bcv_analyzer, "prompt_for_value_validation", return_value=False) as prompt_value_validation,
                     patch.object(bcv_analyzer, "current_timestamp", return_value="2026-06-24 12:34:56"),
                     redirect_stdout(io.StringIO()) as stdout,
                 ):
@@ -167,6 +169,7 @@ class BcvAnalyzerTests(unittest.TestCase):
         self.assertEqual(execute.call_args_list[1].kwargs["connection_kwargs"]["schema"], "public_test1")
         self.assertIn("[2026-06-24 12:34:56] Retrieving column list for table: mrm_log_flat.default.request", stdout.getvalue())
         self.assertIn("[2026-06-24 12:34:56] Retrieving column size", stdout.getvalue())
+        prompt_value_validation.assert_called_once()
         self.assertEqual(len(written_rows), 3)
         self.assertEqual(
             set(written_rows[0].keys()),
@@ -438,6 +441,164 @@ class BcvAnalyzerTests(unittest.TestCase):
 
         self.assertTrue(bcv_analyzer.usage_meets_threshold(row))
         self.assertEqual(bcv_analyzer.get_recommended_action(row, was_queried=False), "Backfill")
+
+    def test_build_value_validation_batch_id_uses_previous_hour_bucket(self):
+        self.assertEqual(
+            bcv_analyzer.build_value_validation_batch_id(datetime(2025, 5, 12, 18, 42, 31)),
+            "20250511180000",
+        )
+
+    def test_load_matched_columns_from_result_csv_reads_only_matched_src_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_path = Path(tmpdir) / "request_result.csv"
+            with result_path.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(output, fieldnames=("status", "src_field"))
+                writer.writeheader()
+                writer.writerows(
+                    [
+                        {"status": "MATCHED", "src_field": "matched_a"},
+                        {"status": "DIFF", "src_field": "diff_col"},
+                        {"status": "MATCHED", "src_field": "matched_b"},
+                        {"status": "MATCHED", "src_field": ""},
+                    ]
+                )
+
+            self.assertEqual(
+                bcv_analyzer.load_matched_columns_from_result_csv(result_path),
+                ["matched_a", "matched_b"],
+            )
+
+    def test_build_value_validation_sql_batches_matched_columns(self):
+        sql_batches = bcv_analyzer.build_value_validation_sql_batches(
+            "request",
+            ["request__transaction_id", "matched_a", "matched_b", "matched_c"],
+            batch_id="20250511180000",
+            batch_size=3,
+        )
+
+        self.assertEqual(len(sql_batches), 2)
+        self.assertEqual(
+            sql_batches[0]["src_sql"],
+            "SELECT\n"
+            "    request__transaction_id,\n"
+            "    matched_a,\n"
+            "    matched_b\n"
+            "FROM mrm_log_flat.default.request TABLESAMPLE BERNOULLI (1)\n"
+            "WHERE bitwise_and(request__bit_flags, 576460752303423488) > 0\n"
+            "  AND process_batch_id = '20250511180000'\n"
+            "LIMIT 10",
+        )
+        self.assertIn("matched_c", sql_batches[1]["src_sql"])
+
+    def test_build_value_validation_bcv_sql_uses_transaction_ids_from_src_result(self):
+        bcv_sql = bcv_analyzer.build_value_validation_bcv_sql(
+            "request",
+            ["request__transaction_id", "matched_a", "matched_b"],
+            batch_id="20250511180000",
+            transaction_ids=["tx_1", "tx'2"],
+        )
+
+        self.assertEqual(
+            bcv_sql,
+            "SELECT\n"
+            "    request__transaction_id,\n"
+            "    matched_a,\n"
+            "    matched_b\n"
+            "FROM etl.public_test1.request\n"
+            "WHERE batch_id = '20250511180000'\n"
+            "  AND request__transaction_id IN (\n"
+            "      'tx_1',\n"
+            "      'tx''2'\n"
+            "  )\n"
+            "LIMIT 10",
+        )
+        self.assertNotIn("request__bit_flags", bcv_sql)
+        self.assertNotIn("process_batch_id", bcv_sql)
+
+    def test_compare_value_validation_results_summarizes_matched_and_mismatched_fields(self):
+        summary = bcv_analyzer.compare_value_validation_results(
+            [
+                {"request__transaction_id": "tx_1", "matched_a": "same", "matched_b": "src_only"},
+                {"request__transaction_id": "tx_2", "matched_a": "same", "matched_b": "left"},
+            ],
+            [
+                {"request__transaction_id": "tx_1", "matched_a": "same", "matched_b": "bcv_only"},
+                {"request__transaction_id": "tx_2", "matched_a": "same", "matched_b": "right"},
+            ],
+            ["request__transaction_id", "matched_a", "matched_b"],
+        )
+
+        self.assertEqual(summary["matched_fields"], ["matched_a"])
+        self.assertEqual(summary["mismatched_fields"], ["matched_b"])
+        self.assertEqual(summary["total_field_count"], 2)
+        self.assertEqual(summary["matched_field_count"], 1)
+        self.assertEqual(summary["mismatched_field_count"], 1)
+        self.assertEqual(summary["matched_field_ratio"], 50.0)
+        self.assertEqual(summary["mismatched_field_ratio"], 50.0)
+
+    def test_print_value_validation_sql_executes_src_then_bcv_and_prints_comparison_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_path = Path(tmpdir) / "request_result.csv"
+            with result_path.open("w", encoding="utf-8", newline="") as output:
+                writer = csv.DictWriter(output, fieldnames=("status", "src_field"))
+                writer.writeheader()
+                writer.writerows(
+                    [
+                        {"status": "MATCHED", "src_field": "request__transaction_id"},
+                        {"status": "MATCHED", "src_field": "matched_a"},
+                        {"status": "MATCHED", "src_field": "matched_b"},
+                        {"status": "DIFF", "src_field": "diff_col"},
+                    ]
+                )
+
+            stdout = io.StringIO()
+            with (
+                patch.object(
+                    bcv_analyzer,
+                    "execute_sql",
+                    side_effect=[
+                        [
+                            {"request__transaction_id": "tx_1", "matched_a": "same", "matched_b": "src_value"},
+                            {"request__transaction_id": "tx_2", "matched_a": "same", "matched_b": "same"},
+                        ],
+                        [
+                            {"request__transaction_id": "tx_1", "matched_a": "same", "matched_b": "bcv_value"},
+                            {"request__transaction_id": "tx_2", "matched_a": "same", "matched_b": "same"},
+                        ],
+                    ],
+                ) as execute,
+                redirect_stdout(stdout),
+            ):
+                bcv_analyzer.print_value_validation_sql(
+                    "request",
+                    result_path,
+                    {"catalog": "mrm_log_flat"},
+                    {"catalog": "etl"},
+                    now=datetime(2025, 5, 12, 18, 42, 31),
+                    batch_size=3,
+                )
+
+        output = stdout.getvalue()
+        self.assertEqual(execute.call_count, 2)
+        self.assertIn("process_batch_id = '20250511180000'", execute.call_args_list[0].args[0])
+        self.assertEqual(execute.call_args_list[0].kwargs["connection_kwargs"], {"catalog": "mrm_log_flat"})
+        self.assertIn("batch_id = '20250511180000'", execute.call_args_list[1].args[0])
+        self.assertIn("'tx_1'", execute.call_args_list[1].args[0])
+        self.assertIn("request__transaction_id IN", execute.call_args_list[1].args[0])
+        self.assertEqual(execute.call_args_list[1].kwargs["connection_kwargs"], {"catalog": "etl"})
+        self.assertIn("Value validation batch_id: 20250511180000", output)
+        self.assertIn("Value validation SQL batch 1/1", output)
+        self.assertIn("SRC SQL:", output)
+        self.assertIn("BCV SQL:", output)
+        self.assertIn("Value validation summary:", output)
+        self.assertIn("Matched fields: 1/2 (50.00%)", output)
+        self.assertIn("Unmatched fields: 1/2 (50.00%)", output)
+        self.assertIn("Unmatched field list: matched_b", output)
+        self.assertNotIn("src_value", output)
+        self.assertNotIn("bcv_value", output)
+        self.assertIn("request__transaction_id IN", output)
+        self.assertIn("batch_id = '20250511180000'", output)
+        self.assertNotIn("Value validation SQL batch 2/2", output)
 
     def test_build_describe_sql_uses_full_table_name(self):
         self.assertEqual(
