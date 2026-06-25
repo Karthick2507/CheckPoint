@@ -29,7 +29,7 @@ OUTPUT_DIR = _SCRIPT_DIR / "output"
 FIELD_SIZE_DIR = _SCRIPT_DIR / "field_size"
 ETL_FIELDS_PATH = _SCRIPT_DIR / "etl_fields.json"
 APP_VERSION = "v0.1"
-USAGE_COLUMNS = ("usage:ETL", "usage:Insights", "usage:Arena", "usage:LQS", "usage:Others")
+USAGE_COLUMNS = ("usage:ETL", "usage:Insights", "usage:Arena", "usage:LQS", "usage:CP", "usage:Others")
 USAGE_QUERY_BATCH_SIZE = 500
 USAGE_QUERY_MAX_RETRIES = 3
 VALUE_VALIDATION_BATCH_SIZE = 500
@@ -174,6 +174,7 @@ SELECT
     a.col AS column_name,
     CASE
         WHEN a.user IN ('sa-dataapp-insights', 'sa-dmo-aqs', 'sa-dataapp-yield', 'svc-ciec-sct', 'sa-trust_standards', 'sa-analytics-scrum') THEN 'Insights'
+        WHEN a.user IN ('publisher') THEN 'CP'
         WHEN a.source LIKE '%Arena%' THEN 'Arena'
         WHEN a.source LIKE '%lqs%' THEN 'LQS'
         ELSE 'Others'
@@ -199,7 +200,7 @@ FROM (
     AND pcu.table_name = {sql_literal(table)}
     AND env = 'prd'
     AND q.user NOT IN ('sqyang', 'yjgou', 'kbhargava', 'yuwang', 'zhfan')
-    AND q.source NOT IN ('presto-python-client')
+    -- AND q.source NOT IN ('presto-python-client')
     AND p.col IN ({col_list})
     AND (NOT regexp_like(q.query, '(?i)select\\s*\\*'))
     AND error_type is null AND error_name is null
@@ -1068,6 +1069,7 @@ def usage_meets_threshold(row: dict[str, Any]) -> bool:
         or get_usage_int(row, "usage:Insights") > 0
         or get_usage_int(row, "usage:Arena") > 0
         or get_usage_int(row, "usage:LQS") >= 10
+        or get_usage_int(row, "usage:CP") > 0
         or get_usage_int(row, "usage:Others") >= 100
     )
 

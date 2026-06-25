@@ -244,6 +244,7 @@ The tool then queries the Presto internal usage tracking tables to find how many
 | `Insights` | Queries from internal Insights service accounts (`sa-dataapp-insights`, etc.) |
 | `Arena`    | Queries from Arena-based sources                                            |
 | `LQS`      | Queries from LQS-based sources                                              |
+| `CP`       | Queries from Custom Reports (`publisher` user)                              |
 | `Others`   | All other query sources                                                     |
 
 **Batching:** Columns are queried in batches of **500** per Presto query (configurable via `USAGE_QUERY_BATCH_SIZE`) to minimize query overhead.
@@ -280,6 +281,7 @@ The following rules are applied to all DIFF rows where **SRC has a value** and *
 | Insights  | > 0       |
 | Arena     | > 0       |
 | LQS       | ≥ 10      |
+| CP        | > 0       |
 | Others    | ≥ 100     |
 
 **Size threshold:** `< 0.03 TiB` (columns with unknown size are treated as small and included)
@@ -304,6 +306,7 @@ Written to `output/<table>_result.csv`. Contains one row per column comparison w
 | `usage:Insights`     | Number of distinct Insights service account queries using this column |
 | `usage:Arena`        | Number of distinct Arena queries using this column           |
 | `usage:LQS`          | Number of distinct LQS queries using this column             |
+| `usage:CP`           | Number of distinct Custom Reports (`publisher`) queries using this column |
 | `usage:Others`       | Number of distinct queries from other sources                |
 | `recommended_action` | `Backfill` / `Excluded - Size Too Large` / `No Backfill - Low Usage` / _(empty)_ |
 | `validation`         | Added after value validation: `Y` (values match), `N` (mismatch), `-` (parent structure node, skipped), or empty (not a MATCHED column) |
