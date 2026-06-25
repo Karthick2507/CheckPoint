@@ -18,8 +18,9 @@ A command-line tool for analyzing schema differences between the **SRC** (source
 - [How It Works](#how-it-works)
   - [1. Schema Comparison](#1-schema-comparison)
   - [2. Column Size Lookup](#2-column-size-lookup)
-  - [3. Usage Data Query](#3-usage-data-query)
-  - [4. Analysis Summary](#4-analysis-summary)
+  - [3. Column Exclusion](#3-column-exclusion)
+  - [4. Usage Data Query](#4-usage-data-query)
+  - [5. Analysis Summary](#5-analysis-summary)
 - [Analysis Rules](#analysis-rules)
 - [Output](#output)
   - [`<table>_result.csv`](#table_resultcsv)
@@ -46,6 +47,9 @@ BCV Analyzer compares the schema of a source table (`mrm_log_flat.default.<table
 SRC Table  ──┐
              ├──► Schema Comparison ──► MATCHED - TYPE DIFF columns ──► (magenta panel in summary)
 BCV Table  ──┘         │
+                       ▼
+                  exclude.csv filter (removed from all further steps)
+                       │
                        ▼
                   DIFF Columns ──► ETL / SOS Usage Check ──► Presto Usage Query ──► Analysis Summary + <table>_result.csv
                                                                (batch, 500/query)
@@ -92,7 +96,7 @@ BCV/
 - Column size `.xlsx` files in the `field_size/` directory
 - `etl_fields.json` in the project root for ETL usage lookup
 - `sos_fields.csv` in the project root for SOS usage lookup
-- `exclude.csv` in the project root to skip specific columns (optional; create with `table,column` headers)
+- `exclude.csv` in the project root to skip specific columns _(optional; create with `table,column` headers)_
 
 ---
 
@@ -109,36 +113,17 @@ pip install -r requirements.txt
 
 > **Tip — Increase Terminal Scrollback Lines**
 >
-> The Analysis Summary output can be lengthy. It is recommended to increase your terminal's scrollback buffer to **30000** lines so you can scroll back through the full results.
+> The Analysis Summary output can be lengthy. It is recommended to increase your terminal's scrollback buffer to **30 000** lines so you can scroll back through the full results.
 >
 > **iTerm2 setup:**
-> 1. Open iTerm2
-> 2. Go to **iTerm2 → Settings**
-> 3. Select **Profiles**
-> 4. Select the profile you are using (e.g. `Default`)
-> 5. Open the **Terminal** tab
-> 6. Find **Scrollback lines** and set it to `30000`
+> 1. Open iTerm2 → **Settings** → **Profiles** → select your profile → **Terminal** tab
+> 2. Set **Scrollback lines** to `30000`
 
 ---
 
 ## Usage
 
 ### Recommended Execution
-
-The recommended way to run BCV Analyzer is to pass the Presto connection details directly via CLI flags:
-
-```bash
-python bcv_analyzer.py \
-  --host presto-gateway.presto.fw1.aws.fwmrm.net:8080 \
-  --user <your-username> \
-  --auth-token <your-auth-token>
-```
-
-Example:
-
-I don't mind at all if you use my username/token to submit presto queries like shown below. If you want to use your own username/token, please follow this wiki guide https://freewheel.atlassian.net/wiki/spaces/DDEU2/pages/528557481/Presto+Gateway+Userguide#Geta-a-token-with-LDAP-account to get a token. Please note token will be expired in 30 days, and you will have to re-apply it following the steps in the above link.
-
-You need to connect to VPN in order to submit queries to production Presto server.
 
 ```bash
 python bcv_analyzer.py \
@@ -147,11 +132,12 @@ python bcv_analyzer.py \
   --auth-token cfeac6c3-db15-4e03-9bad-e0e96ae4932a
 ```
 
-After launching, the interactive UI will prompt you to select a table and run mode.
+To get your own token follow the wiki guide:
+https://freewheel.atlassian.net/wiki/spaces/DDEU2/pages/528557481/Presto+Gateway+Userguide#Geta-a-token-with-LDAP-account
+
+> **Note:** You must be connected to VPN to reach the production Presto gateway.
 
 ### Interactive Mode
-
-Simply run the script with no arguments to launch the interactive UI:
 
 ```bash
 python bcv_analyzer.py
@@ -163,30 +149,18 @@ You will be prompted to:
 
 ### CLI Arguments
 
-```bash
-python bcv_analyzer.py [OPTIONS]
-```
-
-| Option               | Description                                      | Default                    |
-|----------------------|--------------------------------------------------|----------------------------|
-| `--host`             | Presto host                                      | `$PRESTO_HOST`             |
-| `--port`             | Presto port                                      | `$PRESTO_PORT` or `8080`   |
-| `--user`             | Presto user                                      | `$PRESTO_USER`             |
-| `--request-timeout`  | Request timeout (seconds)                        | `$PRESTO_REQUEST_TIMEOUT` or `5` |
-| `--auth-token`       | Auth token (sent as `Authorization: Bearer ...`) | `$PRESTO_AUTH_TOKEN`       |
-| `--auth-header`      | Custom auth header name                          | `$PRESTO_AUTH_HEADER`      |
-| `--table`            | Skip table selection prompt                      | _(interactive)_            |
-| `--help`             | Show help message                                |                            |
-
-Example:
-
-```bash
-python bcv_analyzer.py --host presto.example.com --user alice --table request
-```
+| Option              | Description                                      | Default                           |
+|---------------------|--------------------------------------------------|-----------------------------------|
+| `--host`            | Presto host                                      | `$PRESTO_HOST`                    |
+| `--port`            | Presto port                                      | `$PRESTO_PORT` or `8080`          |
+| `--user`            | Presto user                                      | `$PRESTO_USER`                    |
+| `--request-timeout` | Request timeout (seconds)                        | `$PRESTO_REQUEST_TIMEOUT` or `5`  |
+| `--auth-token`      | Auth token (`Authorization: Bearer ...`)         | `$PRESTO_AUTH_TOKEN`              |
+| `--auth-header`     | Custom auth header name                          | `$PRESTO_AUTH_HEADER`             |
+| `--table`           | Skip table selection prompt                      | _(interactive)_                   |
+| `--help`            | Show help message                                |                                   |
 
 ### Environment Variables
-
-You can combine environment variables with CLI flags:
 
 ```bash
 PRESTO_HOST=presto.example.com PRESTO_USER=alice python bcv_analyzer.py --table request
@@ -196,12 +170,10 @@ PRESTO_HOST=presto.example.com PRESTO_USER=alice python bcv_analyzer.py --table 
 
 ## Run Modes
 
-When prompted, select one of two run modes:
-
 | Mode                | Description |
 |---------------------|-------------|
 | **Full Run**        | Queries Presto for **all** DIFF columns. |
-| **Validation Only** | Skips schema comparison and usage analysis entirely. Reads the previously generated `output/<table>_result.csv` and proceeds directly to [Matched Column Value Validation](#matched-column-value-validation). Requires a result CSV to already exist. |
+| **Validation Only** | Skips schema comparison and usage analysis entirely. Reads the previously generated `output/<table>_result.csv` and proceeds directly to value validation. Requires a result CSV to already exist. |
 
 ---
 
@@ -209,7 +181,7 @@ When prompted, select one of two run modes:
 
 ### 1. Schema Comparison
 
-The tool runs `DESCRIBE` on both the SRC and BCV tables, then compares column names and types:
+The tool runs `DESCRIBE` on both the SRC and BCV tables, then assigns each column one of three statuses:
 
 | Status | Condition |
 |--------|-----------|
@@ -217,45 +189,23 @@ The tool runs `DESCRIBE` on both the SRC and BCV tables, then compares column na
 | `MATCHED - TYPE DIFF` | Column exists in both tables but with **different** types |
 | `DIFF` | Column is present in SRC but **missing** from BCV entirely |
 
-`MATCHED - TYPE DIFF` columns appear in a dedicated **magenta panel** in the Analysis Summary and are also included in value validation so the actual data difference can be observed.
-
-Additionally, columns present in BCV but not in SRC are tracked separately for informational purposes.
+`MATCHED - TYPE DIFF` columns are shown in a dedicated **magenta panel** in the Analysis Summary and are included in value validation. Columns present in BCV but not in SRC are recorded as `DIFF` (with an empty `src_field`) for informational purposes.
 
 ### 2. Column Size Lookup
 
-For each SRC column, the tool looks up its raw data size (in TiB) from the pre-generated `.xlsx` files in `field_size/`. The file naming convention is:
+For each SRC column, the tool looks up its raw data size (in TiB) from pre-generated `.xlsx` files in `field_size/`:
 
 ```
 field_size/<table>_raw_size_in_TiB.xlsx
 ```
 
-The xlsx must contain at minimum two columns: `Field Name` and `Size (TiB)`.
+The file must contain at minimum two columns: `Field Name` and `Size (TiB)`.
 
-### 3. Usage Data Query
+### 3. Column Exclusion
 
-For each DIFF column (SRC present, BCV missing), the tool checks two local reference files before querying Presto:
+Before any usage check or Presto query, columns listed in `exclude.csv` are removed from the analysis for the selected table.
 
-**ETL usage** — checked against `etl_fields.json`, organized by table name:
-
-```json
-{
-  "request": [
-    "request.context.distributor_asset_id"
-  ]
-}
-```
-
-**SOS usage** — checked against `sos_fields.csv`, with `table` and `column` headers and dot-separated field names:
-
-```
-table,column
-request,execution_networks.network_selection_info.candidate_ad_funnel_metrics.ad_creative_checking_metrics.auction_max_ad_duration
-slot,partners.network_selection_info.candidate_ad_funnel_metrics.ad_filling_metrics.pod_position_targeting_check_failed
-```
-
-For both lookups, the SRC column name is normalized by replacing `__` with `.` before matching. For example, `request__context__distributor_asset_id` → `request.context.distributor_asset_id`.
-
-**Column exclusion** — before any usage lookup or Presto query, columns listed in `exclude.csv` are removed from the analysis entirely. `exclude.csv` uses `__`-style SRC column names directly:
+**Format** (`table,column` headers, SRC column names use `__` notation):
 
 ```
 table,column
@@ -264,77 +214,92 @@ slot,slot__internal_only_field
 ```
 
 Excluded columns are:
-- Removed from schema comparison analysis and backfill recommendations
-- Not queried for Presto usage data
-- Not included in `result.csv`
-- Not validated during value validation
-- Shown in a dedicated white/grey panel at the top of the Analysis Summary
+- Filtered out immediately after schema comparison
+- **Not** included in ETL/SOS lookup or Presto usage queries
+- **Not** written to `result.csv`
+- **Not** validated during value validation
+- Shown in a dedicated **white/grey panel** at the very top of the Analysis Summary (field name, status, SRC type, BCV type)
 
-The tool then queries the Presto internal usage tracking tables to find how many distinct queries accessed the column, broken down by user type:
+### 4. Usage Data Query
 
-| User Type  | Source | Description                                                                 |
-|------------|--------|-----------------------------------------------------------------------------|
-| `ETL`      | local file | Column appears in `etl_fields.json` for the selected table; value `Y` or empty |
-| `SOS`      | local file | Column appears in `sos_fields.csv` for the selected table; value `Y` or empty  |
-| `Insights` | Presto | Queries from internal Insights service accounts (`sa-dataapp-insights`, etc.) |
-| `Arena`    | Presto | Queries from Arena-based sources                                            |
-| `LQS`      | Presto | Queries from LQS-based sources                                              |
-| `CP`       | Presto | Queries from Custom Reports (`publisher` user)                              |
-| `AF`       | Presto | Queries from AF ETL (`sa-presto-af-etl` user)                              |
-| `Others`   | Presto | All other query sources                                                     |
+For each remaining DIFF column (SRC present, BCV missing), the tool checks two local reference files and then queries Presto:
 
-**Batching:** Columns are queried in batches of **500** per Presto query (configurable via `USAGE_QUERY_BATCH_SIZE`) to minimize query overhead.
+**ETL usage** — `etl_fields.json`, keyed by table name with dot-separated field paths:
 
-**Retry:** Each batch query is retried up to **3 times** on failure (configurable via `USAGE_QUERY_MAX_RETRIES`).
+```json
+{
+  "request": ["request.context.distributor_asset_id"]
+}
+```
 
-**Query scope:**
-- Date range: `2026-01-01` onwards
-- Environment: `prd` only
-- Excluded users: internal/admin accounts
-- Excluded sources: `presto-python-client`
+**SOS usage** — `sos_fields.csv`, with `table` and `column` headers and dot-separated field paths:
 
-### 4. Analysis Summary
+```
+table,column
+request,execution_networks.network_selection_info.candidate_ad_funnel_metrics.ad_creative_checking_metrics.auction_max_ad_duration
+slot,partners.network_selection_info.candidate_ad_funnel_metrics.ad_filling_metrics.pod_position_targeting_check_failed
+```
 
-After querying usage data, the tool prints a color-coded **Analysis Summary** with up to five panels:
+For both lookups the SRC column name is normalised by replacing `__` with `.` before matching (e.g. `request__context__distributor_asset_id` → `request.context.distributor_asset_id`).
 
-| Panel | Color | Contents |
-|-------|-------|----------|
-| Excluded Columns | ⚪ White/Grey | Columns listed in `exclude.csv` — skipped from all analysis and validation |
-| Recommended for Backfill | 🔵 Cyan | DIFF columns where usage meets threshold AND size < 0.03 TiB |
-| Recommended Excluded | 🟡 Yellow | DIFF columns where usage meets threshold AND size ≥ 0.03 TiB |
-| Recommended No Backfill | 🔴 Red | DIFF columns where usage is below all thresholds |
-| Type Mismatch | 🟣 Magenta | `MATCHED - TYPE DIFF` columns — exist in both tables but with different types |
+**Presto usage query** — counts distinct queries per column broken down by user type:
 
-The Excluded Columns panel is always shown first when `exclude.csv` contains entries for the selected table.
+| User Type  | Source     | Description |
+|------------|------------|-------------|
+| `ETL`      | local file | Column in `etl_fields.json` for the selected table — `Y` or empty |
+| `SOS`      | local file | Column in `sos_fields.csv` for the selected table — `Y` or empty |
+| `Insights` | Presto     | `sa-dataapp-insights`, `sa-dmo-aqs`, `sa-dataapp-yield`, and related accounts |
+| `Arena`    | Presto     | Queries from Arena-based sources |
+| `LQS`      | Presto     | Queries from LQS-based sources |
+| `CP`       | Presto     | Custom Reports (`publisher` user) |
+| `AF`       | Presto     | AF ETL (`sa-presto-af-etl` user) |
+| `Others`   | Presto     | All other query sources |
+
+**Batching:** 500 columns per Presto query (`USAGE_QUERY_BATCH_SIZE`).  
+**Retry:** up to 3 attempts per batch (`USAGE_QUERY_MAX_RETRIES`).  
+**Query scope:** `2026-01-01` onwards · `prd` environment · admin users and `presto-python-client` excluded.
+
+### 5. Analysis Summary
+
+The tool prints a color-coded **Analysis Summary** with up to five panels displayed in this order:
+
+| # | Panel | Color | Contents |
+|---|-------|-------|----------|
+| 1 | **Excluded Columns** | ⚪ White/Grey | Columns from `exclude.csv` — skipped from all steps |
+| 2 | **Recommended for Backfill** | 🔵 Cyan | DIFF columns where usage meets threshold AND size < 0.03 TiB |
+| 3 | **Recommended Excluded** | 🟡 Yellow | DIFF columns where usage meets threshold AND size ≥ 0.03 TiB |
+| 4 | **Recommended No Backfill** | 🔴 Red | DIFF columns where usage is below all thresholds |
+| 5 | **Type Mismatch** | 🟣 Magenta | `MATCHED - TYPE DIFF` columns — field exists in both tables but types differ |
+
+Panels 1 and 5 are only shown when they have entries. Panels 2–4 are always shown.
 
 ---
 
 ## Analysis Rules
 
-The following rules are applied to all DIFF rows where **SRC has a value** and **BCV column is missing**:
+Applied to `DIFF` rows where SRC has a value and the BCV column is missing:
 
-| Panel | Color | Condition | `recommended_action` in CSV |
-|-------|-------|-----------|------------------------------|
-| **Recommended for Backfill** | 🔵 Cyan | Usage meets threshold **AND** (size unknown **OR** size < 0.03 TiB) | `Backfill` |
-| **Recommended Excluded** | 🟡 Yellow | Usage meets threshold **AND** size ≥ 0.03 TiB | `Excluded - Size Too Large` |
-| **Recommended No Backfill** | 🔴 Red | Usage **does not** meet any threshold | `No Backfill - Low Usage` |
+| Panel | Color | Condition | `recommended_action` |
+|-------|-------|-----------|----------------------|
+| Recommended for Backfill | 🔵 Cyan | Usage meets threshold **AND** (size unknown **OR** < 0.03 TiB) | `Backfill` |
+| Recommended Excluded | 🟡 Yellow | Usage meets threshold **AND** size ≥ 0.03 TiB | `Excluded - Size Too Large` |
+| Recommended No Backfill | 🔴 Red | Usage **does not** meet any threshold | `No Backfill - Low Usage` |
 
-**Usage threshold** (any one condition must be met):
+**Usage threshold** — any one of the following must be met:
 
-| Source    | Threshold  |
-|-----------|-----------|
-| ETL       | `Y`       |
-| SOS       | `Y`       |
-| Insights  | > 0       |
-| Arena     | > 0       |
-| LQS       | ≥ 10      |
-| CP        | > 0       |
-| AF        | > 0       |
-| Others    | ≥ 100     |
+| Source   | Threshold |
+|----------|-----------|
+| ETL      | `Y`       |
+| SOS      | `Y`       |
+| Insights | > 0       |
+| Arena    | > 0       |
+| LQS      | ≥ 10      |
+| CP       | > 0       |
+| AF       | > 0       |
+| Others   | ≥ 100     |
 
-**Size threshold:** `< 0.03 TiB` (columns with unknown size are treated as small and included)
-
-> **Note:** `MATCHED - TYPE DIFF` columns do not receive a `recommended_action` and are shown separately in the magenta panel.
+> `MATCHED - TYPE DIFF` columns do not receive a `recommended_action`; they are shown in the magenta panel only.  
+> Columns in `exclude.csv` do not receive any recommendation and are not written to `result.csv`.
 
 ---
 
@@ -342,48 +307,187 @@ The following rules are applied to all DIFF rows where **SRC has a value** and *
 
 ### `<table>_result.csv`
 
-Written to `output/<table>_result.csv`. Contains one row per column comparison with the following fields:
+Written to `output/<table>_result.csv`. Excluded columns are **not** present in this file.
 
-| Column               | Description                                                  |
-|----------------------|--------------------------------------------------------------|
-| `status`             | `MATCHED` · `MATCHED - TYPE DIFF` · `DIFF`                  |
-| `src_field`          | Column name in the SRC table                                 |
-| `src_type`           | Column type in the SRC table                                 |
-| `bcv_field`          | Column name in the BCV table (empty if missing)              |
-| `bcv_type`           | Column type in the BCV table (empty if missing)              |
-| `size`               | Raw column size in TiB (empty if not found in size data)     |
-| `usage:ETL`          | `Y` if the column is used by ETL according to `etl_fields.json`; otherwise empty |
-| `usage:SOS`          | `Y` if the column is used by SOS according to `sos_fields.csv`; otherwise empty  |
-| `usage:Insights`     | Number of distinct Insights service account queries using this column |
-| `usage:Arena`        | Number of distinct Arena queries using this column           |
-| `usage:LQS`          | Number of distinct LQS queries using this column             |
-| `usage:CP`           | Number of distinct Custom Reports (`publisher`) queries using this column |
-| `usage:AF`           | Number of distinct AF ETL (`sa-presto-af-etl`) queries using this column |
-| `usage:Others`       | Number of distinct queries from other sources                |
+| Column | Description |
+|--------|-------------|
+| `status` | `MATCHED` · `MATCHED - TYPE DIFF` · `DIFF` |
+| `src_field` | Column name in the SRC table |
+| `src_type` | Column type in the SRC table |
+| `bcv_field` | Column name in the BCV table (empty if missing) |
+| `bcv_type` | Column type in the BCV table (empty if missing) |
+| `size` | Raw column size in TiB (empty if not in size data) |
+| `usage:ETL` | `Y` if used by ETL (`etl_fields.json`); otherwise empty |
+| `usage:SOS` | `Y` if used by SOS (`sos_fields.csv`); otherwise empty |
+| `usage:Insights` | Distinct Insights query count |
+| `usage:Arena` | Distinct Arena query count |
+| `usage:LQS` | Distinct LQS query count |
+| `usage:CP` | Distinct Custom Reports query count |
+| `usage:AF` | Distinct AF ETL query count |
+| `usage:Others` | Distinct query count from all other sources |
 | `recommended_action` | `Backfill` / `Excluded - Size Too Large` / `No Backfill - Low Usage` / _(empty for MATCHED and MATCHED - TYPE DIFF)_ |
-| `validation`         | Added after value validation: `Y` (values match), `N` (mismatch), `-` (parent structure node, skipped), or empty (DIFF rows are not validated) |
+| `validation` | Added after value validation: `Y` (match) · `N` (mismatch) · `-` (parent node, skipped) · _(empty for DIFF rows)_ |
 
 ### JSON Files
 
-Written to `output/`:
-
-| File                   | Description                        |
-|------------------------|------------------------------------|
-| `<table>.json`         | Full SRC column list from DESCRIBE |
-| `bcv_<table>.json`     | Full BCV column list from DESCRIBE |
+| File | Description |
+|------|-------------|
+| `output/<table>.json` | Full SRC column list from DESCRIBE |
+| `output/bcv_<table>.json` | Full BCV column list from DESCRIBE |
 
 ---
 
 ## Matched Column Value Validation
 
-After the schema comparison and usage analysis, the tool validates the **actual data values** of all `MATCHED` and `MATCHED - TYPE DIFF` columns by running live queries against both SRC and BCV and comparing row by row. This includes type-mismatched columns so that the nature of the data difference can be observed directly.
+Validates the actual data values of all `MATCHED` and `MATCHED - TYPE DIFF` columns by running live queries against both SRC and BCV and comparing row by row. Type-mismatched columns are included so the nature of any data difference can be observed directly.
 
 ### Triggering Validation
 
-Validation is triggered in two ways:
-
-1. **After a Full Run** — once `output/<table>_result.csv` is written, the tool prompts:
-   > `Continue to validate values for MATCHED columns?`
+1. **After a Full Run** — once `result.csv` is written the tool prompts:
+   > `Continue to validate values for MATCHED columns?`  
    Selecting `Yes` starts validation immediately.
 
-2. **Validation Only mode** — select this run mode at
+2. **Validation Only mode** — select at startup to skip schema comparison entirely and jump straight to validation using a previously generated `result.csv`.
+
+### Network ID Filter
+
+Both SRC and BCV queries include a fixed network ID filter:
+
+```sql
+AND request__context__video_cro_network_id = 169843
+```
+
+`169843` is an **integer** literal (not quoted). Applied to every query in every batch.
+
+### Per-Table Join Keys
+
+| Table | Key Columns |
+|-------|-------------|
+| `request` | `request__transaction_id` |
+| `slot` | `request__transaction_id`, `slot__index` _(int)_ |
+| `ad` | `request__transaction_id`, `advertisement__ad_id`, `advertisement__ad_replica_id` _(int)_, `advertisement__ad_type` _(varchar)_ |
+
+Tables without a configured key (`candidate`, `auction`, `ack`) skip validation with a warning. Integer key columns are written as unquoted integer literals in `IN (...)` clauses.
+
+### Parent Structure Node Exclusion
+
+A column is treated as a **parent structure node** and excluded from validation when **both** conditions hold:
+
+1. `src_type` is one of: `varchar` · `array(varchar)` · `array(array(varchar))` · `array(array(array(varchar)))`
+2. At least one child column `<field>__<suffix>` exists anywhere in the result CSV
+
+Parent nodes are:
+- Excluded from all validation queries (no SQL generated for them)
+- Marked **`-`** in the `validation` column of `result.csv`
+- Listed in a dedicated section of the validation report markdown
+
+### Batching Strategy
+
+Columns are split into batches of up to **500** (`VALUE_VALIDATION_BATCH_SIZE`). Key columns are automatically prepended to any batch that doesn't already include them.
+
+**Batch 1 — TABLESAMPLE (anchors the key set):**
+
+```sql
+SELECT
+    <key_columns>,
+    <columns_batch_1>
+FROM mrm_log_flat.default.<table> TABLESAMPLE BERNOULLI (1)
+WHERE bitwise_and(request__bit_flags, 576460752303423488) > 0
+  AND process_batch_id = '<batch_id>'
+  AND request__context__video_cro_network_id = 169843
+LIMIT 10
+```
+
+`batch_id` = current time − 24 h, rounded to the hour (`YYYYMMDDHHMMSS`). Shown in **green** in the terminal.
+
+**Batch 2+ — SRC (targets the same rows):**
+
+```sql
+SELECT <key_columns>, <columns_batch_N>
+FROM mrm_log_flat.default.<table>
+WHERE process_batch_id = '<batch_id>'
+  AND (<key_columns>) IN ((<v1>, <v2>), ...)
+  AND request__context__video_cro_network_id = 169843
+```
+
+**BCV (all batches):**
+
+```sql
+SELECT <key_columns>, <columns_batch_N>
+FROM etl.public_test1.<table>
+WHERE batch_id = '<batch_id>'
+  AND (<key_columns>) IN ((<v1>, <v2>), ...)
+  AND request__context__video_cro_network_id = 169843
+LIMIT 10
+```
+
+All batches run sequentially. Progress is shown with a live spinning indicator (refreshes every second). Results from all batches are merged in memory before the final comparison.
+
+### Comparison Logic
+
+1. Keys from batch 1 SRC rows establish the transaction universe.
+2. Only rows present in **both** SRC and BCV (by key) are compared; unmatched keys are skipped.
+3. Each non-key column is compared as a string.
+4. A column is **matched** (`Y`) if all compared rows agree; otherwise **unmatched** (`N`).
+
+### Validation Summary Output
+
+```
+[2026-06-25 10:31:00] Value validation summary:
+[2026-06-25 10:31:00] Matched transactions:  10/10
+[2026-06-25 10:31:00] Matched fields:       342/350  (97.71%)
+[2026-06-25 10:31:00] Unmatched fields:       8/350   (2.29%)
+```
+
+Key counts are highlighted in color. Both output file paths are printed in **green**.
+
+### Validation Output Files
+
+| File | Description |
+|------|-------------|
+| `output/<table>_result.csv` | Patched with a `validation` column (`Y` / `N` / `-`) |
+| `output/<table>_validation_report.md` | Detailed markdown report |
+
+#### `<table>_validation_report.md` sections
+
+| Section | Contents |
+|---------|----------|
+| **Summary** | Transaction counts, matched/unmatched field counts and percentages |
+| **Excluded Parent Structure Nodes** | Fields skipped as parent nodes, with their types |
+| **SQL Queries** | All SRC and BCV SQL for every batch as fenced code blocks |
+| **Unmatched Field Details** | Per-column diff table: join key · SRC value · BCV value |
+
+Example entry:
+
+```markdown
+### 1. `slot__environment`  _(3 diff(s))_
+
+| Key | SRC | BCV |
+|:---|:---|:---|
+| `abc123 / 1` | `web` | `WEB`    |
+| `def456 / 2` | `app` | *(null)* |
+```
+
+---
+
+## Supported Tables
+
+| Table | SRC Full Name | BCV Full Name | Validation Key Columns |
+|-------|---------------|---------------|------------------------|
+| `request` | `mrm_log_flat.default.request` | `etl.public_test1.request` | `request__transaction_id` |
+| `ad` | `mrm_log_flat.default.ad` | `etl.public_test1.ad` | `request__transaction_id`, `advertisement__ad_id`, `advertisement__ad_replica_id` |
+| `slot` | `mrm_log_flat.default.slot` | `etl.public_test1.slot` | `request__transaction_id`, `slot__index` |
+| `candidate` | `mrm_log_flat.default.candidate` | `etl.public_test1.candidate` | _(not configured — validation skipped)_ |
+| `auction` | `mrm_log_flat.default.auction` | `etl.public_test1.auction` | _(not configured — validation skipped)_ |
+| `ack` | `mrm_log_flat.default.ack` | `etl.public_test1.ack` | _(not configured — validation skipped)_ |
+
+---
+
+## Thresholds Reference
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `USAGE_QUERY_BATCH_SIZE` | `500` | Columns per Presto usage batch query |
+| `USAGE_QUERY_MAX_RETRIES` | `3` | Max retry attempts per usage batch on failure |
+| `VALUE_VALIDATION_BATCH_SIZE` | `500` | Columns per value validation batch query |
+| `VALUE_VALIDATION_NETWORK_ID` | `169843` | Integer network ID filter on all validation queries |
