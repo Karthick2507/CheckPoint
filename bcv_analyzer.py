@@ -28,8 +28,9 @@ _SCRIPT_DIR = Path(__file__).parent
 OUTPUT_DIR = _SCRIPT_DIR / "output"
 FIELD_SIZE_DIR = _SCRIPT_DIR / "field_size"
 ETL_FIELDS_PATH = _SCRIPT_DIR / "etl_fields.json"
+SOS_FIELDS_PATH = _SCRIPT_DIR / "sos_fields.csv"
 APP_VERSION = "v0.1"
-USAGE_COLUMNS = ("usage:ETL", "usage:Insights", "usage:Arena", "usage:LQS", "usage:CP", "usage:Others")
+USAGE_COLUMNS = ("usage:ETL", "usage:SOS", "usage:Insights", "usage:Arena", "usage:LQS", "usage:CP", "usage:AF", "usage:Others")
 USAGE_QUERY_BATCH_SIZE = 500
 USAGE_QUERY_MAX_RETRIES = 3
 VALUE_VALIDATION_BATCH_SIZE = 500
@@ -175,6 +176,7 @@ SELECT
     CASE
         WHEN a.user IN ('sa-dataapp-insights', 'sa-dmo-aqs', 'sa-dataapp-yield', 'svc-ciec-sct', 'sa-trust_standards', 'sa-analytics-scrum') THEN 'Insights'
         WHEN a.user IN ('publisher') THEN 'CP'
+        WHEN a.user IN ('sa-presto-af-etl') THEN 'AF'
         WHEN a.source LIKE '%Arena%' THEN 'Arena'
         WHEN a.source LIKE '%lqs%' THEN 'LQS'
         ELSE 'Others'
@@ -297,6 +299,35 @@ def add_etl_usage_info(
     return rows
 
 
+def load_sos_fields(table: str, sos_fields_path: Path = SOS_FIELDS_PATH) -> set[str]:
+    if not sos_fields_path.exists():
+        return set()
+    fields: set[str] = set()
+    with sos_fields_path.open(encoding="utf-8", newline="") as f:
+        for sos_row in csv.DictReader(f):
+            tbl = (sos_row.get("table") or "").strip()
+            field = (sos_row.get("column") or "").strip()
+            if tbl == table and field:
+                fields.add(field)
+    return fields
+
+
+def add_sos_usage_info(
+    table: str,
+    rows: list[dict[str, Any]],
+    sos_fields_path: Path = SOS_FIELDS_PATH,
+) -> list[dict[str, Any]]:
+    sos_fields = load_sos_fields(table, sos_fields_path)
+    for row in rows:
+        row.setdefault("usage:SOS", "")
+        if not is_missing_bcv_column(row):
+            continue
+        normalized_src_field = normalize_field_name_for_size_lookup(str(row.get("src_field") or ""))
+        if normalized_src_field in sos_fields:
+            row["usage:SOS"] = "Y"
+    return rows
+
+
 def compare_schema_rows(
     table: str,
     src_rows: list[dict[str, Any]],
@@ -312,9 +343,15 @@ def compare_schema_rows(
         src_type = get_case_insensitive(src_row, "type")
         bcv_row = bcv_by_name.get(src_name)
         bcv_type = get_case_insensitive(bcv_row, "type") if bcv_row else ""
+        if bcv_row and src_type == bcv_type:
+            status = "MATCHED"
+        elif bcv_row:
+            status = "MATCHED - TYPE DIFF"
+        else:
+            status = "DIFF"
         compared.append(
             {
-                "status": "MATCHED" if bcv_row and src_type == bcv_type else "DIFF",
+                "status": status,
                 "src_field": src_name,
                 "src_type": src_type,
                 "bcv_field": get_case_insensitive(bcv_row, "column") if bcv_row else "",
@@ -357,6 +394,11 @@ def is_missing_bcv_column(row: dict[str, Any]) -> bool:
         and not row.get("bcv_field")
         and not row.get("bcv_type")
     )
+
+
+def is_type_mismatch(row: dict[str, Any]) -> bool:
+    """True when the field exists in both SRC and BCV but the types differ."""
+    return row.get("status") == "MATCHED - TYPE DIFF"
 
 
 def add_usage_info(
@@ -486,7 +528,8 @@ def load_matched_columns_from_result_csv(result_path: Path) -> list[str]:
         return [
             row["src_field"]
             for row in csv.DictReader(result_file)
-            if row.get("status") == "MATCHED" and row.get("src_field")
+            if row.get("status") in ("MATCHED", "MATCHED - TYPE DIFF")
+            and row.get("src_field")
         ]
 
 
@@ -815,7 +858,7 @@ def update_result_csv_with_validation(
         fieldnames = fieldnames + ["validation"]
 
     for row in rows:
-        if row.get("status") == "MATCHED":
+        if row.get("status") in ("MATCHED", "MATCHED - TYPE DIFF"):
             src_field = row.get("src_field", "")
             if src_field in parent_nodes:
                 row["validation"] = "-"
@@ -1010,9 +1053,9 @@ def resolve_table(table: str | None) -> str:
         Panel(
             f"{APP_BANNER}\nBCV Analyzer {APP_VERSION}\nUse ↑/↓ to choose a table, then press Enter.\n\n"
             "[bold]Analysis Summary Rules[/bold] (applied to DIFF rows where SRC has value, BCV is missing):\n"
-            "  [bold cyan]■ Recommended for Backfill   [/bold cyan]: usage (ETL = [bold]Y[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size < 0.03 TiB (or unknown)\n"
-            "  [bold yellow]■ Recommended Excluded       [/bold yellow]: usage (ETL = [bold]Y[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR Others [bold]≥ 100[/bold])  AND  size ≥ 0.03 TiB\n"
-            "  [bold red]■ Recommended No Backfill    [/bold red]: usage below threshold  (ETL is blank, Insights = 0, Arena = 0, LQS < 10, Others < 100)",
+            "  [bold cyan]■ Recommended for Backfill   [/bold cyan]: usage (ETL = [bold]Y[/bold] OR SOS = [bold]Y[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR CP [bold]> 0[/bold] OR AF [bold]> 0[/bold] OR Others [bold]≥ 100[/bold])  AND  size < 0.03 TiB (or unknown)\n"
+            "  [bold yellow]■ Recommended Excluded       [/bold yellow]: usage (ETL = [bold]Y[/bold] OR SOS = [bold]Y[/bold] OR Insights [bold]> 0[/bold] OR Arena [bold]> 0[/bold] OR LQS [bold]≥ 10[/bold] OR CP [bold]> 0[/bold] OR AF [bold]> 0[/bold] OR Others [bold]≥ 100[/bold])  AND  size ≥ 0.03 TiB\n"
+            "  [bold red]■ Recommended No Backfill    [/bold red]: usage below threshold  (ETL is blank, SOS is blank, Insights = 0, Arena = 0, LQS < 10, CP = 0, AF = 0, Others < 100)",
             title="BCV Analyzer",
             border_style="cyan",
         )
@@ -1063,13 +1106,19 @@ def is_etl_used(row: dict[str, Any]) -> bool:
     return row.get("usage:ETL") == "Y"
 
 
+def is_sos_used(row: dict[str, Any]) -> bool:
+    return row.get("usage:SOS") == "Y"
+
+
 def usage_meets_threshold(row: dict[str, Any]) -> bool:
     return (
         is_etl_used(row)
+        or is_sos_used(row)
         or get_usage_int(row, "usage:Insights") > 0
         or get_usage_int(row, "usage:Arena") > 0
         or get_usage_int(row, "usage:LQS") >= 10
         or get_usage_int(row, "usage:CP") > 0
+        or get_usage_int(row, "usage:AF") > 0
         or get_usage_int(row, "usage:Others") >= 100
     )
 
@@ -1077,7 +1126,7 @@ def usage_meets_threshold(row: dict[str, Any]) -> bool:
 def get_recommended_action(row: dict[str, Any], was_queried: bool) -> str:
     if not is_missing_bcv_column(row):
         return ""
-    if not was_queried and not is_etl_used(row):
+    if not was_queried and not is_etl_used(row) and not is_sos_used(row):
         return ""
     if usage_meets_threshold(row):
         size = row.get("size")
@@ -1087,7 +1136,10 @@ def get_recommended_action(row: dict[str, Any], was_queried: bool) -> str:
     return "No Backfill - Low Usage"
 
 
-def print_analysis_summary(queried_rows: list[dict[str, Any]]) -> None:
+def print_analysis_summary(
+    queried_rows: list[dict[str, Any]],
+    type_mismatch_rows: list[dict[str, Any]] | None = None,
+) -> None:
     from rich.table import Table
 
     # All queried_rows already satisfy is_missing_bcv_column
@@ -1177,6 +1229,26 @@ def print_analysis_summary(queried_rows: list[dict[str, Any]]) -> None:
             border_style="red",
         ))
 
+    # --- Magenta: field name matched but type differs ---
+    if type_mismatch_rows:
+        tm_table = Table(show_header=True, header_style="bold magenta", border_style="magenta", show_lines=True)
+        tm_table.add_column("#", justify="right", style="dim", no_wrap=True)
+        tm_table.add_column("Column Name", style="white", no_wrap=True)
+        tm_table.add_column("SRC Type", style="magenta", no_wrap=True)
+        tm_table.add_column("BCV Type", style="magenta", no_wrap=True)
+        for i, row in enumerate(type_mismatch_rows, 1):
+            tm_table.add_row(
+                str(i),
+                str(row["src_field"]),
+                str(row["src_type"]),
+                str(row["bcv_type"]),
+            )
+        UI_CONSOLE.print(Panel(
+            tm_table,
+            title=f"[bold magenta]Type Mismatch (field exists in BCV but type differs) — {len(type_mismatch_rows)} column(s)[/bold magenta]",
+            border_style="magenta",
+        ))
+
 
 def main(
     host: Annotated[str | None, typer.Option(help="Presto host")] = os.getenv("PRESTO_HOST"),
@@ -1241,19 +1313,21 @@ def main(
     write_rows_as_json_file(bcv_output_rows, f"bcv_{selected_table}")
     comparison_rows = compare_schema_rows(selected_table, src_output_rows, bcv_output_rows, field_sizes)
     add_etl_usage_info(selected_table, comparison_rows, ETL_FIELDS_PATH)
+    add_sos_usage_info(selected_table, comparison_rows, SOS_FIELDS_PATH)
     comparison_rows, queried_rows = add_usage_info(selected_table, comparison_rows, src_connection_kwargs)
     queried_fields = {str(r["src_field"]) for r in queried_rows}
     summary_rows = list(queried_rows)
     summary_fields = set(queried_fields)
     for row in comparison_rows:
         src_field = str(row.get("src_field") or "")
-        if is_missing_bcv_column(row) and is_etl_used(row) and src_field not in summary_fields:
+        if is_missing_bcv_column(row) and (is_etl_used(row) or is_sos_used(row)) and src_field not in summary_fields:
             summary_rows.append(row)
             summary_fields.add(src_field)
     for row in comparison_rows:
         was_queried = is_missing_bcv_column(row) and str(row.get("src_field")) in queried_fields
         row["recommended_action"] = get_recommended_action(row, was_queried)
-    print_analysis_summary(summary_rows)
+    type_mismatch_rows = [row for row in comparison_rows if is_type_mismatch(row)]
+    print_analysis_summary(summary_rows, type_mismatch_rows=type_mismatch_rows)
     result_filename = f"{selected_table}_result.csv"
     write_rows_as_csv_file(
         comparison_rows,
