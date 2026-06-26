@@ -345,19 +345,10 @@ Validates the actual data values of all `MATCHED` and `MATCHED - TYPE DIFF` colu
 
 1. **After a Full Run** — once `result.csv` is written the tool prompts:
    > `Continue to validate values for MATCHED columns?`  
-   Selecting `Yes` starts validation immediately.
+   Selecting `Yes` then asks:
+   > `Select number of transactions to sample for validation: 10 / 100 / 1000`
 
-2. **Validation Only mode** — select at startup to skip schema comparison entirely and jump straight to validation using a previously generated `result.csv`.
-
-### Network ID Filter
-
-Both SRC and BCV queries include a fixed network ID filter:
-
-```sql
-AND request__context__video_cro_network_id = 169843
-```
-
-`169843` is an **integer** literal (not quoted). Applied to every query in every batch.
+2. **Validation Only mode** — select at startup to skip schema comparison entirely and jump straight to validation using a previously generated `result.csv`. The transaction-count prompt is shown at the start of the validation step.
 
 ### Per-Table Join Keys
 
@@ -394,11 +385,11 @@ SELECT
 FROM mrm_log_flat.default.<table> TABLESAMPLE BERNOULLI (1)
 WHERE bitwise_and(request__bit_flags, 576460752303423488) > 0
   AND process_batch_id = '<batch_id>'
-  AND request__context__video_cro_network_id = 169843
-LIMIT 10
+LIMIT <transaction_limit>
 ```
 
-`batch_id` = current time − 24 h, rounded to the hour (`YYYYMMDDHHMMSS`). Shown in **green** in the terminal.
+`batch_id` = current time − 24 h, rounded to the hour (`YYYYMMDDHHMMSS`). Shown in **green** in the terminal.  
+`transaction_limit` = the value selected in the prompt (10 / 100 / 1000).
 
 **Batch 2+ — SRC (targets the same rows):**
 
@@ -407,7 +398,6 @@ SELECT <key_columns>, <columns_batch_N>
 FROM mrm_log_flat.default.<table>
 WHERE process_batch_id = '<batch_id>'
   AND (<key_columns>) IN ((<v1>, <v2>), ...)
-  AND request__context__video_cro_network_id = 169843
 ```
 
 **BCV (all batches):**
@@ -417,8 +407,7 @@ SELECT <key_columns>, <columns_batch_N>
 FROM etl.public_test1.<table>
 WHERE batch_id = '<batch_id>'
   AND (<key_columns>) IN ((<v1>, <v2>), ...)
-  AND request__context__video_cro_network_id = 169843
-LIMIT 10
+LIMIT <transaction_limit>
 ```
 
 All batches run sequentially. Progress is shown with a live spinning indicator (refreshes every second). Results from all batches are merged in memory before the final comparison.
@@ -490,4 +479,3 @@ Example entry:
 | `USAGE_QUERY_BATCH_SIZE` | `500` | Columns per Presto usage batch query |
 | `USAGE_QUERY_MAX_RETRIES` | `3` | Max retry attempts per usage batch on failure |
 | `VALUE_VALIDATION_BATCH_SIZE` | `500` | Columns per value validation batch query |
-| `VALUE_VALIDATION_NETWORK_ID` | `169843` | Integer network ID filter on all validation queries |

@@ -35,17 +35,16 @@ USAGE_COLUMNS = ("usage:ETL", "usage:SOS", "usage:Insights", "usage:Arena", "usa
 USAGE_QUERY_BATCH_SIZE = 500
 USAGE_QUERY_MAX_RETRIES = 3
 VALUE_VALIDATION_BATCH_SIZE = 500
-VALUE_VALIDATION_NETWORK_ID_COLUMN = "request__context__video_cro_network_id"
-VALUE_VALIDATION_NETWORK_ID = 169843
+VALUE_VALIDATION_REQUEST_TIMEOUT = 60  # seconds — validation queries can be slow
 # Key columns used to join SRC and BCV rows, configured per table.
 # For tables not listed here, value validation is skipped.
 TABLE_KEY_COLUMNS: dict[str, list[str]] = {
     "request": ["request__transaction_id"],
     "slot": ["request__transaction_id", "slot__index"],
     "ad": ["request__transaction_id", "advertisement__ad_id", "advertisement__ad_replica_id"],
+    "ack": ["request__transaction_id", "ack__kafka_msg_key"],
     # "candidate": [],  # TODO: to be configured
     # "auction":   [],  # TODO: to be configured
-    # "ack":       [],  # TODO: to be configured
 }
 # Columns whose SQL literal must be unquoted (int). All others default to quoted string.
 TABLE_KEY_COLUMN_TYPES: dict[str, str] = {
@@ -626,6 +625,7 @@ def build_value_validation_sql_batches(
     batch_id: str,
     key_columns: list[str],
     batch_size: int = VALUE_VALIDATION_BATCH_SIZE,
+    limit: int = 10,
 ) -> list[dict[str, Any]]:
     sql_batches = []
     for batch_start in range(0, len(columns), batch_size):
@@ -636,13 +636,13 @@ def build_value_validation_sql_batches(
             batch_columns = missing_keys + batch_columns
         select_list = ",\n".join(f"    {column}" for column in batch_columns)
         src_sql = (
+            '-- pgw_tags: {"client_tags":"2XLARGE"}\n'
             "SELECT\n"
             f"{select_list}\n"
             f"FROM {build_full_table_name(table)} TABLESAMPLE BERNOULLI (1)\n"
             f"WHERE bitwise_and(request__bit_flags, 576460752303423488) > 0\n"
             f"  AND process_batch_id = {sql_literal(batch_id)}\n"
-            f"  AND {VALUE_VALIDATION_NETWORK_ID_COLUMN} = {VALUE_VALIDATION_NETWORK_ID}\n"
-            f"LIMIT 10"
+            f"LIMIT {limit}"
         )
         sql_batches.append({"src_sql": src_sql, "columns": batch_columns})
     return sql_batches
@@ -654,17 +654,18 @@ def build_value_validation_bcv_sql(
     batch_id: str,
     key_columns: list[str],
     keys: list[tuple],
+    limit: int = 10,
 ) -> str:
     select_list = ",\n".join(f"    {column}" for column in columns)
     key_clause = build_key_in_clause(key_columns, keys)
     return (
+        '-- pgw_tags: {"client_tags":"2XLARGE"}\n'
         "SELECT\n"
         f"{select_list}\n"
         f"FROM {build_bcv_table_name(table)}\n"
         f"WHERE batch_id = {sql_literal(batch_id)}\n"
         f"  AND {key_clause}\n"
-        f"  AND {VALUE_VALIDATION_NETWORK_ID_COLUMN} = {VALUE_VALIDATION_NETWORK_ID}\n"
-        f"LIMIT 10"
+        f"LIMIT {limit}"
     )
 
 
@@ -679,12 +680,12 @@ def build_value_validation_src_sql_by_keys(
     select_list = ",\n".join(f"    {column}" for column in columns)
     key_clause = build_key_in_clause(key_columns, keys)
     return (
+        '-- pgw_tags: {"client_tags":"2XLARGE"}\n'
         "SELECT\n"
         f"{select_list}\n"
         f"FROM {build_full_table_name(table)}\n"
         f"WHERE process_batch_id = {sql_literal(batch_id)}\n"
         f"  AND {key_clause}\n"
-        f"  AND {VALUE_VALIDATION_NETWORK_ID_COLUMN} = {VALUE_VALIDATION_NETWORK_ID}\n"
     )
 
 
@@ -892,6 +893,18 @@ def update_result_csv_with_validation(
         writer.writerows(rows)
 
 
+def prompt_for_transaction_limit() -> int:
+    selected = questionary.select(
+        "Select number of transactions to sample for validation:",
+        choices=[
+            questionary.Choice(title="10", value=10),
+            questionary.Choice(title="100", value=100),
+            questionary.Choice(title="1000", value=1000),
+        ],
+    ).ask()
+    return selected if selected is not None else 10
+
+
 def prompt_for_value_validation() -> bool:
     selected = questionary.confirm("Continue to validate values for MATCHED columns?").ask()
     return bool(selected)
@@ -905,6 +918,10 @@ def print_value_validation_sql(
     now: datetime | None = None,
     batch_size: int = VALUE_VALIDATION_BATCH_SIZE,
 ) -> None:
+    # Use a longer timeout for validation queries (they can be slow)
+    src_connection_kwargs = {**src_connection_kwargs, "request_timeout": VALUE_VALIDATION_REQUEST_TIMEOUT}
+    bcv_connection_kwargs = {**bcv_connection_kwargs, "request_timeout": VALUE_VALIDATION_REQUEST_TIMEOUT}
+
     matched_columns = load_matched_columns_from_result_csv(result_path)
     if not matched_columns:
         log_info("No MATCHED columns found for value validation.")
@@ -930,9 +947,12 @@ def print_value_validation_sql(
         log_info(f"No key columns configured for table '{table}'. Skipping value validation.")
         return
 
+    transaction_limit = prompt_for_transaction_limit()
+    log_info(f"Sampling up to {transaction_limit} transaction(s) for validation.")
+
     batch_id = build_value_validation_batch_id(now)
     sql_batches = build_value_validation_sql_batches(
-        table, matched_columns, batch_id, key_columns, batch_size=batch_size,
+        table, matched_columns, batch_id, key_columns, batch_size=batch_size, limit=transaction_limit,
     )
     num_batches = len(sql_batches)
     UI_CONSOLE.print(
@@ -943,6 +963,7 @@ def print_value_validation_sql(
 
     # ── Batch 1: TABLESAMPLE — anchors the key set ────────────────────────────
     batch0 = sql_batches[0]
+    print(f"\n[Batch 1/{num_batches} — SRC SQL]\n{batch0['src_sql']}\n")
     with spinning_cursor(f"Executing value validation batch 1/{num_batches} — SRC"):
         src_rows_0 = execute_sql(batch0["src_sql"], connection_kwargs=src_connection_kwargs)
 
@@ -954,8 +975,9 @@ def print_value_validation_sql(
         return
 
     bcv_sql_0 = build_value_validation_bcv_sql(
-        table, batch0["columns"], batch_id, key_columns, keys,
+        table, batch0["columns"], batch_id, key_columns, keys, limit=transaction_limit,
     )
+    print(f"\n[Batch 1/{num_batches} — BCV SQL]\n{bcv_sql_0}\n")
     with spinning_cursor(f"Executing value validation batch 1/{num_batches} — BCV"):
         bcv_rows_0 = execute_sql(bcv_sql_0, connection_kwargs=bcv_connection_kwargs)
 
@@ -981,12 +1003,14 @@ def print_value_validation_sql(
         src_sql_n = build_value_validation_src_sql_by_keys(
             table, batch["columns"], batch_id, key_columns, keys,
         )
+        print(f"\n[Batch {batch_num}/{num_batches} — SRC SQL]\n{src_sql_n}\n")
         with spinning_cursor(f"Executing value validation batch {batch_num}/{num_batches} — SRC"):
             src_rows_n = execute_sql(src_sql_n, connection_kwargs=src_connection_kwargs)
 
         bcv_sql_n = build_value_validation_bcv_sql(
-            table, batch["columns"], batch_id, key_columns, keys,
+            table, batch["columns"], batch_id, key_columns, keys, limit=transaction_limit,
         )
+        print(f"\n[Batch {batch_num}/{num_batches} — BCV SQL]\n{bcv_sql_n}\n")
         with spinning_cursor(f"Executing value validation batch {batch_num}/{num_batches} — BCV"):
             bcv_rows_n = execute_sql(bcv_sql_n, connection_kwargs=bcv_connection_kwargs)
 
