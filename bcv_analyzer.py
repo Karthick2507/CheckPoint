@@ -963,7 +963,6 @@ def print_value_validation_sql(
 
     # ── Batch 1: TABLESAMPLE — anchors the key set ────────────────────────────
     batch0 = sql_batches[0]
-    print(f"\n[Batch 1/{num_batches} — SRC SQL]\n{batch0['src_sql']}\n")
     with spinning_cursor(f"Executing value validation batch 1/{num_batches} — SRC"):
         src_rows_0 = execute_sql(batch0["src_sql"], connection_kwargs=src_connection_kwargs)
 
@@ -977,7 +976,6 @@ def print_value_validation_sql(
     bcv_sql_0 = build_value_validation_bcv_sql(
         table, batch0["columns"], batch_id, key_columns, keys, limit=transaction_limit,
     )
-    print(f"\n[Batch 1/{num_batches} — BCV SQL]\n{bcv_sql_0}\n")
     with spinning_cursor(f"Executing value validation batch 1/{num_batches} — BCV"):
         bcv_rows_0 = execute_sql(bcv_sql_0, connection_kwargs=bcv_connection_kwargs)
 
@@ -1003,14 +1001,12 @@ def print_value_validation_sql(
         src_sql_n = build_value_validation_src_sql_by_keys(
             table, batch["columns"], batch_id, key_columns, keys,
         )
-        print(f"\n[Batch {batch_num}/{num_batches} — SRC SQL]\n{src_sql_n}\n")
         with spinning_cursor(f"Executing value validation batch {batch_num}/{num_batches} — SRC"):
             src_rows_n = execute_sql(src_sql_n, connection_kwargs=src_connection_kwargs)
 
         bcv_sql_n = build_value_validation_bcv_sql(
             table, batch["columns"], batch_id, key_columns, keys, limit=transaction_limit,
         )
-        print(f"\n[Batch {batch_num}/{num_batches} — BCV SQL]\n{bcv_sql_n}\n")
         with spinning_cursor(f"Executing value validation batch {batch_num}/{num_batches} — BCV"):
             bcv_rows_n = execute_sql(bcv_sql_n, connection_kwargs=bcv_connection_kwargs)
 
