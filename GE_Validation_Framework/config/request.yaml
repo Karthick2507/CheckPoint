@@ -1,0 +1,114 @@
+# Source->target mapping and known-difference config for the `request` table.
+# Every entry here is cited in ../README.md under "Source -> Target Mapping".
+# This file is the machine-readable form of that document, consumed by ge_validator/.
+
+table: request
+src_table: mrm_log_flat.default.request
+bcv_table: etl.public_test1.request
+
+key_columns:
+  - request__transaction_id
+
+# Bit 59 - the team's existing sampled-row flag (Hoover++ Validations Event Level.md, lines 32-38).
+# Row filter: bitwise_and(request__bit_flags, sampled_bit_flag) > 0
+sampled_bit_flag: 576460752303423488
+
+# Columns confirmed to exist with matching name/type on both SRC and BCV.
+# Safe to assert as passing schema expectations today.
+confirmed_matching_columns:
+  - name: request__transaction_id
+    type: null  # key column; existence checked, type not asserted (varies by cluster config)
+  - name: request__context__rbp_device_type
+    type: null
+  - name: request__context__rbp_platform
+    type: null
+  - name: inventory__asset_chain__role
+    type: null
+  - name: inventory__asset_chain__network_id
+    type: null
+  - name: inventory__site_section_chain__role
+    type: null
+  - name: inventory__site_section_chain__network_id
+    type: null
+  - name: visitor__dma_code_id
+    type: null
+  - name: visitor__country
+    type: null
+  - name: request_info__slot_ad_unit_ids
+    type: null
+  - name: execution_networks__role
+    type: null
+
+# LQS-internal columns present in SRC, intentionally never surfaced in the BCV.
+# Not validated at all (mirrors bcv_analyzer.py's exclude.csv).
+excluded_columns:
+  - __path__
+  - __offset__
+  - __file_size__
+  - __footer_size__
+
+# Documented, discussed-and-confirmed bulk drops (not an oversight).
+# Representative sample only -- the full ~613-column list is in the diff doc;
+# bcv_analyzer.py's own DIFF output is the source of truth for the complete set.
+known_dropped_prefixes:
+  - prefix: inventory__asset_chain__
+    note: >
+      311 columns confirmed dropped (revenue, priority/rule, funnel-metrics,
+      order/listing sub-fields). Confirmed intentional per discussion 28/05/2026.
+    source: "mrm_log_flat.default.request vs etl.public_test1.request.md, lines 2071-2803"
+  - prefix: inventory__site_section_chain__
+    note: "~302 columns dropped, same categories and same confirmed decision."
+    source: "mrm_log_flat.default.request vs etl.public_test1.request.md, lines 2822-3560"
+
+# Documented type changes between SRC and BCV.
+known_type_diffs:
+  - column: request__timestamp
+    src_type: "timestamp(3)"
+    bcv_type: "timestamp(3) with time zone"
+    expected: true
+    note: >
+      BCV uses from_unixtime() vs Hoover's direct cast; both represent UTC but
+      require explicit timezone normalization before value comparison.
+    source: "Request fields analysis on BCV.md, lines 33-35"
+  - column: execution_networks__network_selection_info__candidate_ad_funnel_metrics__phase_metrics__value
+    src_type: "array(array(array(bigint)))"
+    bcv_type: "array(array(array(integer)))"
+    expected: false  # tracked as a known ISSUE, not a benign difference -- see known_issues
+    note: "Source protobuf field is uint32; narrowing to `integer` may silently truncate."
+    source: "mrm_log_flat.default.request vs etl.public_test1.request.md, line 36"
+
+# Value-level equivalences the team's existing validation tooling already suppresses.
+# Applied to normalize SRC/BCV values before comparison, so only genuinely new
+# divergences surface as failures.
+known_value_equivalences:
+  column_specific:
+    - column: request__yield_optimization_ids
+      equivalent_values: ["[]", null]
+    - column: request__client_facing_ivt_reason_flag
+      equivalent_values: [null, "0"]
+  generic_groups:
+    - ["", "0", "\\N", "false", "none", "null"]
+    - ["", "[]", "\\N", "none", "null", "{}"]
+
+# Real, open issues -- must NOT be silently normalized away. Reported every run,
+# tagged separately from unexpected new failures, until resolved upstream.
+known_issues:
+  - id: batch_id_rename_inconsistency
+    description: >
+      Request fields analysis on BCV.md documents batch_id renamed to
+      process_batch_id in H++ views, but the validation SQL in the diff doc
+      still queries batch_id. Unresolved as of this writing.
+    source: "Request fields analysis on BCV.md line 28; diff doc line 4183"
+  - id: phase_metrics_value_type_narrowing
+    description: >
+      execution_networks__...__phase_metrics__value narrows bigint -> integer;
+      source protobuf field is uint32, so this may silently truncate large values.
+    source: "mrm_log_flat.default.request vs etl.public_test1.request.md, line 36"
+
+# Postbid-IVT-dependent fields -- expected to differ only when validating
+# against an H++ build that hasn't run postbid IVT processing yet.
+ivt_dependent_columns:
+  - request__client_facing_ivt_reason_flag
+  - request__flags
+  - request__mrc_compliance_label
+  - request__traffic_type
