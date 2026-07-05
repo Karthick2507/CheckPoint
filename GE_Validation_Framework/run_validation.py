@@ -3,7 +3,7 @@
     python run_validation.py --table slot  --host ... --user ... --auth-token ...
     python run_validation.py --table request ...
 
-Mirrors BVC_Analyzer_Sample/bcv_analyzer.py's connection conventions (same args,
+Mirrors BCV_analyzer/bcv_analyzer.py's connection conventions (same args,
 same Presto/Trino gateway + VPN requirements).
 """
 from __future__ import annotations

@@ -15,7 +15,7 @@ from ge_validator.config import TableValidationConfig
 # bcv_analyzer.py is a flat script with no package structure (no __init__.py / pyproject.toml),
 # so it can't be imported as a normal package -- add its directory to sys.path instead of
 # duplicating its already-tested SQL-building and execute_sql logic here.
-_BCV_ANALYZER_DIR = Path(__file__).resolve().parents[2] / "BVC_Analyzer_Sample"
+_BCV_ANALYZER_DIR = Path(__file__).resolve().parents[2] / "BCV_analyzer"
 if str(_BCV_ANALYZER_DIR) not in sys.path:
     sys.path.insert(0, str(_BCV_ANALYZER_DIR))
 
