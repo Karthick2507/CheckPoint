@@ -62,9 +62,29 @@ All claims below are cited to files under `trainingDocs/`. Where a doc is incons
 
 Two layers, matching the team's existing two-layer approach (`Hoover - Hoover++ Validation Plan.md`):
 
-1. **Schema-level** — does the BCV table have the columns this mapping says it should, with the types this mapping says it should? Implemented as a GE Expectation Suite generated directly from `config/request.yaml`'s confirmed-matching and known-type-diff lists (see [`ge_validator/schema_suite.py`](ge_validator/schema_suite.py)).
+1. **Schema-level** — does the BCV table have the columns this mapping says it should, with the types this mapping says it should? Implemented as a GE Expectation Suite generated directly from `config/<table>.yaml`'s confirmed-matching and known-type-diff lists (see [`ge_validator/schema_suite.py`](ge_validator/schema_suite.py)).
 2. **Row-level reconciliation** — sample rows via the same `TABLESAMPLE` + sampled-bit-flag contract `bcv_analyzer.py` already uses (reused, not reimplemented — see [`ge_validator/reconciliation.py`](ge_validator/reconciliation.py)), normalize known-equivalent values, then assert column-pair equality per matched column via GE. Known-issue columns are still checked and reported, but tagged separately from unexpected new failures — preserving the team's Y/N triage discipline instead of collapsing everything into a single pass/fail.
 
-## Extending to other tables
+## Running it
 
-The same `[]`-vs-`null` / protobuf-default-vs-Avro-null root cause recurs across every table (confirmed in `ack`, `candidate`, `auction`, `slot` — see inventory pass), so extending this framework means adding a new `config/<table>.yaml` with that table's confirmed-matching columns, known type diffs, and equivalence exceptions — the code in `ge_validator/` is already table-agnostic and takes the table name as a parameter. `slot` is the highest-value next target: 290 columns on `partners`, the deepest nesting, a genuine `phase_metrics__value`-style type bug, and a real UTC-vs-local-time bug on `request__timestamp` (997/1000 transactions matched, 83.45% field match rate per `Slot fields analysis on BCV.md`).
+The orchestration is table-agnostic and lives in `ge_validator/runner.py`. Point the generic CLI at any table that has a `config/<table>.yaml`:
+
+```bash
+python run_validation.py --table request --host <presto-host> --user <you> --auth-token <token>
+python run_validation.py --table slot    --host <presto-host> --user <you> --auth-token <token>
+```
+
+`run_request_validation.py` is kept as a thin back-compat wrapper for the original vertical slice; new tables should use `run_validation.py --table <name>`. Both share the same runner, so there is no duplicated flow. A live run needs a Presto/Trino gateway + VPN (the same constraint `bcv_analyzer.py` has); without one, the logic is exercised by the test suite against local sqlite/pandas fixtures.
+
+## Tables covered
+
+| Table | Config | Join keys | Notable |
+|---|---|---|---|
+| `request` | `config/request.yaml` | `request__transaction_id` | 613-column bulk struct drops; timestamp timezone type diff; `batch_id`→`process_batch_id` open issue |
+| `slot` | `config/slot.yaml` | `request__transaction_id`, `slot__index` *(int)* | 8 benign `avails` int→bigint widenings; the same `phase_metrics__value` narrowing bug; a real UTC-vs-local-time value bug on `request__timestamp`; dropped `visitor__identity_user_ids__*`; a `request__hashed_key_value` mismatch still under investigation |
+
+`slot` is the sharpest illustration of why the Y/N triage matters: of its 92 unmatched fields (16.55% per `Slot fields analysis on BCV.md`), the large majority are the same benign `[]`-vs-`null` / `[None]`-vs-`null` semantics the equivalence groups absorb, while only four are genuine open bugs — the framework keeps those four visible instead of letting them drown in the noise.
+
+## Extending to further tables
+
+The same `[]`-vs-`null` / protobuf-default-vs-Avro-null root cause recurs across every table (confirmed in `ack`, `candidate`, `auction` — see inventory pass), so extending this framework means adding a new `config/<table>.yaml` with that table's confirmed-matching columns, known type diffs, and equivalence exceptions, then running `python run_validation.py --table <name>`. The code in `ge_validator/` is already table-agnostic — no code change is needed to onboard a new table, only a config and a citation trail.

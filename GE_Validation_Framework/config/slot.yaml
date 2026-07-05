@@ -1,0 +1,161 @@
+# Source->target mapping and known-difference config for the `slot` table.
+# Every entry here is cited to trainingDocs/Slot fields analysis on BCV.md.
+# This file is the machine-readable form of that document, consumed by ge_validator/.
+#
+# Reported baseline from that doc (lines 28-31):
+#   Matched transactions: 997/1000
+#   Matched fields:       464/556 (83.45%)
+#   Unmatched fields:      92/556 (16.55%)
+
+table: slot
+src_table: mrm_log_flat.default.slot
+bcv_table: etl.public_test1.slot
+
+# slot rows are keyed by BOTH the request they belong to AND the slot's position
+# within that request. slot__index is an integer literal in SQL (bcv_analyzer.py's
+# TABLE_KEY_COLUMN_TYPES already declares this), which the reused sampling code
+# handles automatically.
+key_columns:
+  - request__transaction_id
+  - slot__index
+
+# Bit 59 - the team's existing sampled-row flag, same contract as request
+# (Hoover++ Validations Event Level.md, lines 32-38). slot rows carry request__bit_flags too.
+sampled_bit_flag: 576460752303423488
+
+# Columns confirmed to exist on both SRC and BCV.
+# NOTE: the slot doc enumerates *mismatches*, not matches, so unlike request.yaml there
+# is no explicit "confirmed matching" list to lift. Only the join keys are asserted here;
+# the full MATCHED set should be sourced from bcv_analyzer.py's own DIFF/MATCHED output
+# for slot rather than invented. Every other column the doc names is captured below as a
+# type diff, value equivalence, or open issue instead.
+confirmed_matching_columns:
+  - name: request__transaction_id
+    type: null  # key column; existence checked, type not asserted
+  - name: slot__index
+    type: null  # key column; integer, but type assertion left to bcv_analyzer's key handling
+
+# LQS-internal columns present in SRC, intentionally never surfaced in the BCV.
+# Not validated at all (mirrors bcv_analyzer.py's exclude.csv). Slot doc lines 5-10.
+excluded_columns:
+  - __path__
+  - __offset__
+  - __file_size__
+  - __footer_size__
+
+# slot has no documented bulk-dropped struct prefixes analogous to request's
+# inventory__asset_chain__* / inventory__site_section_chain__* drops. Left empty
+# deliberately -- absence is a fact from the doc, not an oversight.
+known_dropped_prefixes: []
+
+# Documented type changes between SRC and BCV. Slot fields analysis on BCV.md, lines 35-45.
+known_type_diffs:
+  # --- avails widening: array(integer) -> array(bigint), all expected/benign ---
+  # "Some avails in PB are int32, some are int64, to unify it, we use bigint for all
+  #  avails-related fields." (doc lines 37-44)
+  - column: partners__avails_category__avails
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification -- all avails-related fields widened to bigint on purpose."
+    source: "Slot fields analysis on BCV.md, line 37"
+  - column: partners__avails_category__unfilled_avails
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification (same as partners__avails_category__avails)."
+    source: "Slot fields analysis on BCV.md, line 38"
+  - column: partners__avails_category__unconstrained_avails
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification."
+    source: "Slot fields analysis on BCV.md, line 39"
+  - column: partners__avails_category__market_avails
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification."
+    source: "Slot fields analysis on BCV.md, line 40"
+  - column: partners__avails_category__ssp_avails
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification."
+    source: "Slot fields analysis on BCV.md, line 41"
+  - column: partners__avails_category__total_avails
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification."
+    source: "Slot fields analysis on BCV.md, line 42"
+  - column: partners__avails_category__total_unfilled_avails
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification."
+    source: "Slot fields analysis on BCV.md, line 43"
+  - column: partners__avails_category__opportunity
+    src_type: "array(integer)"
+    bcv_type: "array(bigint)"
+    expected: true
+    note: "avails unification."
+    source: "Slot fields analysis on BCV.md, line 44"
+  # --- the same phase_metrics typo that request has: bigint -> integer narrowing ---
+  - column: partners__network_selection_info__candidate_ad_funnel_metrics__phase_metrics__value
+    src_type: "array(array(array(bigint)))"
+    bcv_type: "array(array(array(integer)))"
+    expected: false  # real issue -- see known_issues
+    note: "Looks like a typo in H++; the field is defined as uint32 in Log_Record.proto."
+    source: "Slot fields analysis on BCV.md, line 45"
+
+# Value-level equivalences the team's existing validation tooling already suppresses.
+# The slot doc's huge [] vs null and [None] vs null mismatch lists (lines 53, 66-68) are
+# all the same "[] vs null" semantic issue documented in Request fields analysis on BCV,
+# so the generic groups below cover them without enumerating every column by name.
+known_value_equivalences:
+  column_specific:
+    # null vs 0: transformer coalesces null -> 0, so no downstream L3 impact (doc line 61).
+    - column: request__client_facing_ivt_reason_flag
+      equivalent_values: [null, "0"]
+  generic_groups:
+    - ["", "0", "\\N", "false", "none", "null"]
+    - ["", "[]", "\\N", "none", "null", "{}"]
+
+# Real, open issues -- must NOT be silently normalized away. Reported every run,
+# tagged separately from unexpected new failures, until resolved upstream.
+known_issues:
+  - id: request_timestamp_local_timezone
+    description: >
+      request__timestamp shows a 4-hour offset (SRC 2026-06-30 14:07:20 vs
+      BCV 2026-06-30 10:07:20) -- the BCV appears to render local time instead of UTC.
+      Marked "YES need change" in the doc. Note this is the same underlying timezone
+      handling that request.yaml captures as a type diff; on slot it surfaces as an
+      actual value bug.
+    source: "Slot fields analysis on BCV.md, line 51"
+  - id: phase_metrics_value_type_narrowing
+    description: >
+      partners__...__phase_metrics__value narrows bigint -> integer; source protobuf
+      field is uint32, so this may silently truncate large values. Same bug as request.
+    source: "Slot fields analysis on BCV.md, line 45"
+  - id: visitor_identity_user_ids_dropped
+    description: >
+      visitor__identity_user_ids__namespace_id and __id carry real values in SRC
+      (e.g. [6], ['d4b972f0-...']) but come back null in BCV. Marked "YES need change".
+    source: "Slot fields analysis on BCV.md, lines 63-64"
+  - id: request_hashed_key_value_mismatch
+    description: >
+      request__hashed_key_value differs between SRC and BCV
+      (2ed5deba... vs cab385a4...). Marked CHECKING -- root cause not yet established.
+    source: "Slot fields analysis on BCV.md, line 58"
+
+# Postbid-IVT-dependent fields -- expected to differ only when validating against an
+# H++ build that hasn't run postbid IVT processing yet. Slot fields analysis lines 52-62.
+ivt_dependent_columns:
+  - request__flags
+  - request__mrc_compliance_label
+  - request__traffic_compliance__mrc_compliance_flag
+  - request__traffic_type
+  - request__backend_filtration_reason
+  - request__client_facing_ivt_reason_flag
+  - visitor__filtration_reason

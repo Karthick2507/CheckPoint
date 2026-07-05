@@ -1,7 +1,10 @@
-"""CLI entrypoint for the `request` table vertical slice.
+"""Generic CLI entrypoint: validate any table that has a config/<table>.yaml.
 
-Kept for back-compat; it's a thin wrapper over the generic runner. New tables
-should use run_validation.py --table <name>. Both share ge_validator/runner.py.
+    python run_validation.py --table slot  --host ... --user ... --auth-token ...
+    python run_validation.py --table request ...
+
+Mirrors BVC_Analyzer_Sample/bcv_analyzer.py's connection conventions (same args,
+same Presto/Trino gateway + VPN requirements).
 """
 from __future__ import annotations
 
@@ -13,10 +16,9 @@ import typer
 
 from ge_validator.runner import config_path_for_table, run_validation
 
-_DEFAULT_CONFIG = config_path_for_table("request")
-
 
 def main(
+    table: Annotated[str, typer.Option("--table", help="Table name; loads config/<table>.yaml")] = "request",
     host: Annotated[str | None, typer.Option(help="Presto/Trino host")] = os.getenv("PRESTO_HOST"),
     port: Annotated[int, typer.Option(help="Presto/Trino port")] = int(os.getenv("PRESTO_PORT", "8080")),
     user: Annotated[str | None, typer.Option(help="Presto/Trino user")] = os.getenv("PRESTO_USER"),
@@ -30,10 +32,16 @@ def main(
         "PRESTO_AUTH_HEADER"
     ),
     transaction_limit: Annotated[int, typer.Option(help="Rows to sample for reconciliation")] = 10,
-    config_path: Annotated[Path, typer.Option("--config", help="Table config YAML")] = _DEFAULT_CONFIG,
+    config: Annotated[
+        Path | None, typer.Option("--config", help="Explicit config path (overrides --table)")
+    ] = None,
 ) -> None:
     if not host or not user:
         raise SystemExit("Missing required connection args: host, user")
+
+    config_path = config or config_path_for_table(table)
+    if not config_path.exists():
+        raise SystemExit(f"No config found for table '{table}': {config_path}")
 
     run_validation(
         config_path=config_path,
