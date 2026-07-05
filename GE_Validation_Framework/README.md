@@ -6,6 +6,56 @@ All claims below are cited to files under `trainingDocs/`. Where a doc is incons
 
 ---
 
+## How to Run
+
+### Prerequisites
+1. **VPN** connected — the production Presto/Trino gateway is only reachable over VPN (same requirement as `bcv_analyzer.py`).
+2. **A Presto auth token** — see the wiki link in `BVC_Analyzer_Sample/README.md` for how to generate one.
+3. **Python 3.11+**.
+
+### Install
+A single install covers everything — `requirements.txt` already includes the `bcv_analyzer.py` libraries this framework reuses (`questionary`, `rich`, `openpyxl`), so you do **not** need to install the BVC requirements separately:
+
+```bash
+cd GE_Validation_Framework
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Run a validation
+Use the generic entrypoint and name any table that has a `config/<table>.yaml`:
+
+```bash
+python run_validation.py --table request \
+  --host presto-gateway.presto.fw1.aws.fwmrm.net:8080 \
+  --user <you> --auth-token <token>
+
+python run_validation.py --table slot \
+  --host presto-gateway.presto.fw1.aws.fwmrm.net:8080 \
+  --user <you> --auth-token <token>
+```
+
+Connection args mirror `bcv_analyzer.py` and also read from the same env vars (`PRESTO_HOST`, `PRESTO_USER`, `PRESTO_AUTH_TOKEN`, …), so you can export those once and just run `python run_validation.py --table slot`. Add `--transaction-limit 100` (or `1000`) to sample more rows for the reconciliation step.
+
+Each run does both layers back-to-back for that one table: schema check against the BCV table, then row-level reconciliation. `run_request_validation.py` is kept as a thin back-compat wrapper; new tables should use `run_validation.py --table <name>`.
+
+### Do I run BVC first, then GE?
+**No — not at runtime.** GE does not consume `bcv_analyzer.py`'s output; it reuses its *code* (imports its sampling functions) and connects to Presto itself. BVC and GE sit on **two different time horizons:**
+
+- **BVC** is run *once by a human* whenever the schema changes, to discover what changed and decide which columns are confirmed-matching / benign / real bugs. That decision is written into `config/<table>.yaml`.
+- **GE** then runs *repeatedly and automatically* against that frozen config as a regression guard. It only needs BVC again when the schema structurally changes and the config must be re-derived.
+
+So the pipeline is *BVC → (human writes config) → GE runs forever*, not *BVC → GE* on every run.
+
+### Verify without a gateway
+No VPN/gateway handy? The logic is exercised end-to-end against local sqlite/pandas fixtures:
+
+```bash
+PYTHONPATH=. python3 -m unittest discover -s tests -v
+```
+
+---
+
 ## Key Concepts
 
 **Hoover vs. Hoover++.** Hoover is the current 7-table ad-serving log model (`request`, `visitor`, `auction`, `candidate`, `ad`, `slot`, `ack`), with heavy duplication of shared context across tables — the `ack` table alone needs 5,000+ fields just to link callbacks back to entities (`MVP Demo about Hoover++.md`, lines 5–12). Hoover++ merges these into one table, pushes unnesting to consumers, splits `ack` into three sub-entities (Ad/Slot/Request Acks), and moves from batch to streaming ingestion (`MVP Demo`, lines 14–19, 80–84).
@@ -64,17 +114,6 @@ Two layers, matching the team's existing two-layer approach (`Hoover - Hoover++ 
 
 1. **Schema-level** — does the BCV table have the columns this mapping says it should, with the types this mapping says it should? Implemented as a GE Expectation Suite generated directly from `config/<table>.yaml`'s confirmed-matching and known-type-diff lists (see [`ge_validator/schema_suite.py`](ge_validator/schema_suite.py)).
 2. **Row-level reconciliation** — sample rows via the same `TABLESAMPLE` + sampled-bit-flag contract `bcv_analyzer.py` already uses (reused, not reimplemented — see [`ge_validator/reconciliation.py`](ge_validator/reconciliation.py)), normalize known-equivalent values, then assert column-pair equality per matched column via GE. Known-issue columns are still checked and reported, but tagged separately from unexpected new failures — preserving the team's Y/N triage discipline instead of collapsing everything into a single pass/fail.
-
-## Running it
-
-The orchestration is table-agnostic and lives in `ge_validator/runner.py`. Point the generic CLI at any table that has a `config/<table>.yaml`:
-
-```bash
-python run_validation.py --table request --host <presto-host> --user <you> --auth-token <token>
-python run_validation.py --table slot    --host <presto-host> --user <you> --auth-token <token>
-```
-
-`run_request_validation.py` is kept as a thin back-compat wrapper for the original vertical slice; new tables should use `run_validation.py --table <name>`. Both share the same runner, so there is no duplicated flow. A live run needs a Presto/Trino gateway + VPN (the same constraint `bcv_analyzer.py` has); without one, the logic is exercised by the test suite against local sqlite/pandas fixtures.
 
 ## Tables covered
 

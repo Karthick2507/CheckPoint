@@ -1,5 +1,13 @@
+# Direct dependencies of GE_Validation_Framework
 great_expectations
 trino[sqlalchemy]
 pandas
 pyyaml
 typer
+
+# Reused from BVC_Analyzer_Sample: ge_validator imports bcv_analyzer.py to share its
+# sampling / SQL-building code, so bcv_analyzer's own top-level imports must resolve too.
+# Pinned here so a single `pip install -r requirements.txt` is enough to run the framework.
+questionary
+rich
+openpyxl
