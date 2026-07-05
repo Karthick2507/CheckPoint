@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-_BCV_ANALYZER_DIR = Path(__file__).resolve().parents[1].parent / "BVC_Analyzer_Sample"
+_BCV_ANALYZER_DIR = Path(__file__).resolve().parents[1].parent / "BCV_analyzer"
 if str(_BCV_ANALYZER_DIR) not in sys.path:
     sys.path.insert(0, str(_BCV_ANALYZER_DIR))
 

@@ -1,6 +1,6 @@
 # GE Validation Framework — Hoover → Hoover++ ETL Validation
 
-A Great Expectations (GE / GX) based validation framework for the Hoover → Hoover++ migration, modeled on the reference tool `BVC_Analyzer_Sample/bcv_analyzer.py`. This document is the Task 1 deliverable: Key Concepts, Source→Target Mappings, documented data-break points, and validation strategy — scoped to the `request` table as the first vertical slice. The pattern generalizes to `ad`, `slot`, `candidate`, `auction`, `ack` (see [Extending to other tables](#extending-to-other-tables)).
+A Great Expectations (GE / GX) based validation framework for the Hoover → Hoover++ migration, modeled on the reference tool `BCV_analyzer/bcv_analyzer.py`. This document is the Task 1 deliverable: Key Concepts, Source→Target Mappings, documented data-break points, and validation strategy — scoped to the `request` table as the first vertical slice. The pattern generalizes to `ad`, `slot`, `candidate`, `auction`, `ack` (see [Extending to other tables](#extending-to-other-tables)).
 
 All claims below are cited to files under `trainingDocs/`. Where a doc is inconsistent with itself or with `bcv_analyzer.py`, that's called out explicitly rather than silently resolved — surfacing exactly that kind of conflict is one of the stated goals of this exercise.
 
@@ -10,7 +10,7 @@ All claims below are cited to files under `trainingDocs/`. Where a doc is incons
 
 ### Prerequisites
 1. **VPN** connected — the production Presto/Trino gateway is only reachable over VPN (same requirement as `bcv_analyzer.py`).
-2. **A Presto auth token** — see the wiki link in `BVC_Analyzer_Sample/README.md` for how to generate one.
+2. **A Presto auth token** — see the wiki link in `BCV_analyzer/README.md` for how to generate one.
 3. **Python 3.11+**.
 
 ### Install
