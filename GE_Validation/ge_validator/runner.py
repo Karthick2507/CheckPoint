@@ -53,18 +53,19 @@ def run_validation(
     )
 
     context = datasource.get_context()
-    bcv_datasource = datasource.add_sql_datasource(
-        context,
-        name=f"{config.table}_bcv",
-        connection_string=datasource.build_trino_connection_string(host, port, user, bcv_catalog, bcv_schema),
-        engine_kwargs=datasource.build_engine_kwargs(bcv_connection_kwargs),
-    )
 
     # --- Schema-level validation ---
+    # Read the BCV schema over bcv_analyzer's connection (DESCRIBE), then run GE
+    # column-existence expectations against a pandas batch. Avoids GE's native Trino
+    # SQLAlchemy engine, which the Presto gateway rejects on its connection probe.
+    bcv_schema = schema_suite.fetch_bcv_schema(config, bcv_connection_kwargs)
     schema = schema_suite.build_schema_suite(context, config)
-    schema_validation = schema_suite.run_schema_suite(context, bcv_datasource, config, schema)
-    schema_result = schema_validation.run()
-    report.print_summary(f"{config.table} — schema", report.summarize(schema_result, config))
+    schema_validation, schema_dataframe = schema_suite.run_schema_suite(context, config, schema, bcv_schema)
+    schema_result = schema_validation.run(batch_parameters={"dataframe": schema_dataframe})
+    report.print_summary(f"{config.table} — schema (column existence)", report.summarize(schema_result, config))
+
+    type_diff_results = schema_suite.verify_type_diffs(bcv_schema, config)
+    schema_suite.print_type_diff_summary(f"{config.table} — schema (type diffs)", type_diff_results)
 
     # --- Row-level reconciliation ---
     columns = [c.name for c in config.confirmed_matching_columns] + [
