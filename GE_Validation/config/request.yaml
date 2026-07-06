@@ -1,5 +1,5 @@
 # Source->target mapping and known-difference config for the `request` table.
-# Every entry here is cited in ../README_BCV.md under "Source -> Target Mapping".
+# Every entry here is cited in ../../README.md (Part I, "Source -> Target Mapping").
 # This file is the machine-readable form of that document, consumed by ge_validator/.
 
 table: request
