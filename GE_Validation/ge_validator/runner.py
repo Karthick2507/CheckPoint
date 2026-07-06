@@ -57,6 +57,7 @@ def run_validation(
         context,
         name=f"{config.table}_bcv",
         connection_string=datasource.build_trino_connection_string(host, port, user, bcv_catalog, bcv_schema),
+        engine_kwargs=datasource.build_engine_kwargs(bcv_connection_kwargs),
     )
 
     # --- Schema-level validation ---
