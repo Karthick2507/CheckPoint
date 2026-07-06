@@ -17,7 +17,7 @@ All claims below are cited to files under `trainingDocs/`. Where a doc is incons
 A single install covers everything — `requirements.txt` already includes the `bcv_analyzer.py` libraries this framework reuses (`questionary`, `rich`, `openpyxl`), so you do **not** need to install the BVC requirements separately:
 
 ```bash
-cd GE_Validation_Framework
+cd GE_Validation
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
