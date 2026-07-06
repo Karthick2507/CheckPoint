@@ -30,18 +30,22 @@ All claims below are cited to files under `trainingDocs/`. Where a doc is incons
 3. **Python 3.11+**.
 
 ### Install
-A single install covers everything — `requirements.txt` already includes the `bcv_analyzer.py` libraries this framework reuses (`questionary`, `rich`, `openpyxl`), so you do **not** need to install the BVC requirements separately:
+There is **one consolidated `requirements.txt` at the repo root** covering both the GE framework and the `bcv_analyzer.py` libraries it reuses (`questionary`, `rich`, `openpyxl`, `trino[sqlalchemy]`, …) — a single install covers everything, and you do **not** need to install the BCV requirements separately. Create the virtualenv at the repo root so it sees that file:
 
 ```bash
-cd GE_Validation
+# from the repo root (not from GE_Validation/ — requirements.txt lives at the root)
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> **Note:** the requirements file was moved from `GE_Validation/requirements.txt` up to the repo root. If you have an older venv, re-run `pip install -r requirements.txt` from the root — installing from inside `GE_Validation/` will no longer find it and is the usual cause of a `ModuleNotFoundError: No module named 'great_expectations'`.
+
 ### Run a validation
-Use the generic entrypoint and name any table that has a `config/<table>.yaml`:
+The entrypoints live in `GE_Validation/` and must be run from there (relative imports + config paths). With the root venv active:
 
 ```bash
+cd GE_Validation
+
 python run_validation.py --table request \
   --host presto-gateway.presto.fw1.aws.fwmrm.net:8080 \
   --user <you> --auth-token <token>
