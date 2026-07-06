@@ -1,4 +1,4 @@
-# Direct dependencies of GE_Validation_Framework
+# Direct dependencies of GE_Validation
 great_expectations
 trino[sqlalchemy]
 pandas
