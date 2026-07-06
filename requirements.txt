@@ -1,0 +1,13 @@
+# Direct dependencies of BCV_Validation
+trino[sqlalchemy]
+typer
+questionary
+openpyxl
+
+# Direct dependencies of GE_Validation
+great_expectations
+pandas
+pyyaml
+rich
+
+

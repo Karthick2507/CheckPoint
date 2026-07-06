@@ -7,15 +7,11 @@ Mirrors BCV_analyzer/bcv_analyzer.py's connection conventions (same args,
 same Presto/Trino gateway + VPN requirements).
 """
 from __future__ import annotations
-
 import os
 from pathlib import Path
 from typing import Annotated
-
 import typer
-
 from ge_validator.runner import config_path_for_table, run_validation
-
 
 def main(
     table: Annotated[str, typer.Option("--table", help="Table name; loads config/<table>.yaml")] = "request",
