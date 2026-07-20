@@ -43,7 +43,7 @@ TABLE_KEY_COLUMNS: dict[str, list[str]] = {
     "slot": ["request__transaction_id", "slot__index"],
     "ad": ["request__transaction_id", "advertisement__ad_id", "advertisement__ad_replica_id"],
     "ack": ["request__transaction_id", "ack__kafka_msg_key"],
-    # "candidate": [],  # TODO: to be configured
+    "candidate": ["request__transaction_id"],
     # "auction":   [],  # TODO: to be configured
 }
 # Columns whose SQL literal must be unquoted (int). All others default to quoted string.
