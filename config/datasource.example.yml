@@ -1,0 +1,26 @@
+# Presto/Trino datasource for the GE validation framework.
+#
+# Secrets are best supplied via environment variables. Any ${VAR} token below
+# is interpolated at load time; auth_token / host / user / port also fall back
+# to the same PRESTO_* variables that bcv_analyzer honours.
+#
+#   export PRESTO_AUTH_TOKEN=cfeac6c3-....
+#   python -m ge_framework.cli validate \
+#       --datasource config/datasource.example.yml \
+#       --suite config/suites/request.example.yml
+#
+# NOTE: reaching the production gateway requires VPN access.
+
+datasource:
+  name: presto_mrm
+  host: presto-gateway.presto.fw1.aws.fwmrm.net
+  port: 8080
+  user: ${PRESTO_USER}
+  catalog: mrm_log_flat
+  schema: default
+  http_scheme: https
+  request_timeout: 30
+  # Sent as "Authorization: Bearer <token>". Leave unset to pull from
+  # $PRESTO_AUTH_TOKEN, or pass --auth-token on the CLI.
+  auth_token: ${PRESTO_AUTH_TOKEN}
+  auth_header: Authorization

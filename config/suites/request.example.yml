@@ -1,0 +1,49 @@
+# Example expectation suite for the `request` table.
+#
+# `suite.asset` selects the data to validate — either a `table` asset
+# (table_name [+ schema_name]) or a `query` asset (raw SQL). Each entry under
+# `expectations` uses the snake_case expectation name plus its arguments; see
+# `python -m ge_framework.cli list-expectations` for the full list.
+
+suite:
+  name: request_quality
+  asset:
+    type: table
+    name: request
+    table_name: request
+    schema_name: default
+    batch: whole_table
+
+expectations:
+  # The primary key must always be present.
+  - type: expect_column_values_to_not_be_null
+    column: request__transaction_id
+
+  # Transaction ids should be unique across the sampled batch.
+  - type: expect_column_values_to_be_unique
+    column: request__transaction_id
+
+  # The table should never be empty.
+  - type: expect_table_row_count_to_be_between
+    min_value: 1
+
+  # A required structural column must exist.
+  - type: expect_column_to_exist
+    column: request__transaction_id
+
+# ---------------------------------------------------------------------------
+# Example of a query asset instead of a table asset:
+#
+# suite:
+#   name: request_recent_quality
+#   asset:
+#     type: query
+#     name: request_recent
+#     query: >
+#       SELECT request__transaction_id, request__event_time
+#       FROM mrm_log_flat.default.request
+#       WHERE process_batch_id = '20260101000000'
+#       LIMIT 1000
+# expectations:
+#   - type: expect_column_values_to_not_be_null
+#     column: request__transaction_id
