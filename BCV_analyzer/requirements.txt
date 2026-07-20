@@ -1,4 +1,0 @@
-trino[sqlalchemy]
-typer
-questionary
-openpyxl
