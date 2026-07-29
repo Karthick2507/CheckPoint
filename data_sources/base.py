@@ -78,9 +78,12 @@ class DataSource(ABC):
             cursor = connection.cursor()
             cursor.execute(sql)
             if cursor.description is None:
+                # DML/DDL (INSERT/DELETE/CREATE ...): commit so writes persist.
+                self._commit(connection)
                 return []
             columns = [column[0] for column in cursor.description]
             rows = cursor.fetchall()
+            self._commit(connection)
             return [dict(zip(columns, row)) for row in rows]
         finally:
             if cursor is not None:
@@ -92,6 +95,14 @@ class DataSource(ABC):
                 connection.close()
             except Exception as exc:  # pragma: no cover - defensive cleanup
                 print(f"Warning: failed to close connection cleanly: {exc}", file=sys.stderr)
+
+    @staticmethod
+    def _commit(connection: Any) -> None:
+        """Commit a raw connection, tolerating drivers/queries that can't."""
+        try:
+            connection.commit()
+        except Exception:  # pragma: no cover - some read paths/dialects no-op
+            pass
 
     # -- schema introspection --------------------------------------------
 
