@@ -3,7 +3,10 @@
 # `suite.asset` selects the data to validate — either a `table` asset
 # (table_name [+ schema_name]) or a `query` asset (raw SQL). Each entry under
 # `expectations` uses the snake_case expectation name plus its arguments; see
-# `python -m ge_framework.cli list-expectations` for the full list.
+# `python -m cli list-expectations` for the full list.
+#
+# `severity` (critical | warning, default warning) drives warn-and-continue
+# reporting: a failed `critical` is flagged prominently but never blocks the run.
 
 suite:
   name: request_quality
@@ -15,21 +18,25 @@ suite:
     batch: whole_table
 
 expectations:
-  # The primary key must always be present.
+  # The primary key must always be present (completeness).
   - type: expect_column_values_to_not_be_null
     column: request__transaction_id
+    severity: critical
 
-  # Transaction ids should be unique across the sampled batch.
+  # Transaction ids should be unique across the sampled batch (uniqueness).
   - type: expect_column_values_to_be_unique
     column: request__transaction_id
+    severity: critical
 
-  # The table should never be empty.
+  # The table should never be empty (volume).
   - type: expect_table_row_count_to_be_between
     min_value: 1
+    severity: warning
 
-  # A required structural column must exist.
+  # A required structural column must exist (schema).
   - type: expect_column_to_exist
     column: request__transaction_id
+    severity: warning
 
 # ---------------------------------------------------------------------------
 # Example of a query asset instead of a table asset:
@@ -47,3 +54,4 @@ expectations:
 # expectations:
 #   - type: expect_column_values_to_not_be_null
 #     column: request__transaction_id
+#     severity: critical

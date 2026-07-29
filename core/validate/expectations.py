@@ -11,7 +11,7 @@ from typing import Any
 
 import great_expectations.expectations as gxe
 
-from ge_framework.config import ExpectationConfig
+from core.validate.suite_config import ExpectationConfig
 
 
 def expectation_class_name(exp_type: str) -> str:

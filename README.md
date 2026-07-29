@@ -2,7 +2,7 @@
 
 A command-line tool for analyzing schema differences between the **SRC** (source) tables and **BCV** (Backward Compatible View) tables in Presto/Trino, and generating backfill recommendations based on column usage data.
 
-> **Related tool — [GE Validation Framework](ge_framework/README.md):** a config-driven [Great Expectations](https://greatexpectations.io/) data-quality framework that runs expectation suites against the same Presto/Trino gateway (shared Bearer-token connection style). Use the BCV Analyzer for one-off SRC↔BCV migration analysis, and the GE framework for repeatable, CI-friendly data-quality checks. See [`ge_framework/README.md`](ge_framework/README.md).
+> **Related tool — ETL Framework (in progress under `core/`, `data_sources/`, `quality/`):** a config-driven [Great Expectations](https://greatexpectations.io/) ETL + data-quality framework with a pluggable multi-source connector layer (Presto, Snowflake, …). Use the BCV Analyzer for one-off SRC↔BCV migration analysis, and the ETL framework for repeatable, CI-friendly pipelines and quality checks. Full docs land in `DESIGN.md` / `README.md` once the build is complete.
 
 ---
 

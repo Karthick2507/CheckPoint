@@ -16,9 +16,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from ge_framework.framework import ValidationOutcome
+from core.validate.framework import ValidationOutcome
 
-DEFAULT_OUTPUT_DIR = Path("ge_output")
+DEFAULT_OUTPUT_DIR = Path("etl_output")
 
 
 def render_console(outcome: ValidationOutcome, console: Console | None = None) -> None:

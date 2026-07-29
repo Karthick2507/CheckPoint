@@ -1,14 +1,14 @@
 """Core Great Expectations validation framework.
 
-``GEValidationFramework`` wires up the GE 1.x Fluent objects from the config
-models and runs a suite against a Presto/Trino asset:
+``GEValidationFramework`` wires up the GE 1.x Fluent objects and runs a suite
+against any :class:`~data_sources.base.DataSource`:
 
-    datasource -> asset -> batch definition -> suite -> validation definition
-    -> checkpoint -> run -> normalized :class:`ValidationOutcome`
+    data source -> asset -> batch definition -> suite -> validation definition
+    -> run -> normalized :class:`ValidationOutcome`
 
-The framework is datasource-agnostic in its plumbing: the same code path runs
-against any SQLAlchemy-reachable database, which is what the test-suite uses
-(sqlite) to exercise the full flow without a live Presto gateway.
+The framework is fully source-agnostic: it registers the GE SQL datasource from
+the ``DataSource``'s ``connection_string`` + ``engine_kwargs``, so Presto,
+Snowflake, or (in tests) sqlite all run through the identical code path.
 """
 
 from __future__ import annotations
@@ -16,6 +16,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any
+
+import great_expectations as gx
+
+from core.validate.expectations import build_expectations
+from core.validate.suite_config import AssetConfig, SuiteConfig
+from data_sources.base import DataSource
 
 
 def _json_safe(value: Any) -> Any:
@@ -32,12 +38,6 @@ def _json_safe(value: Any) -> Any:
     except TypeError:
         return str(value)
 
-import great_expectations as gx
-
-from ge_framework.config import AssetConfig, DatasourceConfig, SuiteConfig
-from ge_framework.expectations import build_expectations
-from ge_framework.presto import build_connection_string, build_engine_kwargs
-
 
 @dataclass
 class ExpectationResultRow:
@@ -51,6 +51,7 @@ class ExpectationResultRow:
     unexpected_count: int | None = None
     unexpected_percent: float | None = None
     exception_message: str | None = None
+    severity: str = "warning"
 
 
 @dataclass
@@ -70,6 +71,18 @@ class ValidationOutcome:
     def success_percent(self) -> float:
         return 100.0 * self.successful / self.evaluated if self.evaluated else 0.0
 
+    @property
+    def failures(self) -> list["ExpectationResultRow"]:
+        return [row for row in self.results if not row.success]
+
+    @property
+    def critical_failures(self) -> list["ExpectationResultRow"]:
+        return [row for row in self.failures if row.severity == "critical"]
+
+    @property
+    def has_critical_failure(self) -> bool:
+        return bool(self.critical_failures)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "suite_name": self.suite_name,
@@ -84,6 +97,7 @@ class ValidationOutcome:
                     "expectation_type": row.expectation_type,
                     "column": row.column,
                     "success": row.success,
+                    "severity": row.severity,
                     "kwargs": _json_safe(row.kwargs),
                     "observed_value": _json_safe(row.observed_value),
                     "unexpected_count": row.unexpected_count,
@@ -134,27 +148,27 @@ class ValidationOutcome:
 
 
 class GEValidationFramework:
-    """Runs config-driven Great Expectations suites against a SQL datasource."""
+    """Runs config-driven Great Expectations suites against any DataSource."""
 
-    def __init__(self, datasource: DatasourceConfig, context: Any | None = None) -> None:
-        self.datasource = datasource
+    def __init__(self, data_source: DataSource, context: Any | None = None) -> None:
+        self.data_source = data_source
         self.context = context if context is not None else gx.get_context(mode="ephemeral")
 
     # -- object wiring ---------------------------------------------------
 
     def register_datasource(self) -> Any:
-        """Register (or fetch) the SQL datasource for this framework."""
+        """Register (or fetch) the GE SQL datasource from this DataSource."""
         try:
-            return self.context.data_sources.get(self.datasource.name)
+            return self.context.data_sources.get(self.data_source.name)
         except (KeyError, ValueError, LookupError):
             pass
         except Exception:
             # Older/newer GE may raise a bespoke "not found" error; fall through.
             pass
         return self.context.data_sources.add_sql(
-            name=self.datasource.name,
-            connection_string=build_connection_string(self.datasource),
-            kwargs=build_engine_kwargs(self.datasource),
+            name=self.data_source.name,
+            connection_string=self.data_source.connection_string(),
+            kwargs=self.data_source.engine_kwargs(),
         )
 
     def _get_or_create_asset(self, source: Any, asset_cfg: AssetConfig) -> Any:
@@ -203,8 +217,13 @@ class GEValidationFramework:
             )
         )
         suite_result = validation_definition.run()
-        return ValidationOutcome.from_suite_result(
+        outcome = ValidationOutcome.from_suite_result(
             suite_result,
             suite_name=suite_cfg.name,
             asset_name=suite_cfg.asset.name,
         )
+        # Tag each result with the severity declared in the suite config so the
+        # warn-and-continue reporting can tier failures without blocking.
+        for row in outcome.results:
+            row.severity = suite_cfg.severity_of(row.expectation_type, row.kwargs)
+        return outcome
