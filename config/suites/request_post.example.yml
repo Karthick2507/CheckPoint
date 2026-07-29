@@ -1,0 +1,16 @@
+# Gate 3 (post-load): validate the target table after loading.
+suite:
+  name: request_post
+  asset:
+    type: table
+    name: request_clean
+    table_name: ANALYTICS.PUBLIC.REQUEST_CLEAN
+
+expectations:
+  - type: expect_table_row_count_to_be_between
+    min_value: 1
+    severity: critical
+
+  - type: expect_column_values_to_be_unique
+    column: transaction_id
+    severity: critical

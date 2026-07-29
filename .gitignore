@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ETL framework generated output
+etl_output/
+ge_output/
+gx/
+uncommitted/
+
+# BCV analyzer generated output
+output/
+
+# OS / editor
+.DS_Store
+.idea/

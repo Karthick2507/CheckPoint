@@ -1,0 +1,64 @@
+# Example ETL pipeline: daily `request` extract -> validate -> transform ->
+# validate -> load -> validate.
+#
+# Connections are referenced by name and resolved from config/connections/:
+#   source.connection: mrm_presto        -> config/connections/mrm_presto.example.yml
+#   target.connection: analytics_snowflake -> config/connections/analytics_snowflake.example.yml
+#
+# Run:
+#   export PRESTO_AUTH_TOKEN=... SNOWFLAKE_PASSWORD=...
+#   python -m cli run-pipeline --pipeline config/pipelines/request_daily.example.yml
+
+pipeline:
+  name: request_daily
+  env: prod
+
+  source:
+    connection: mrm_presto
+    table: mrm_log_flat.default.request
+    batch_key: process_batch_id        # incremental filter key
+
+  extract:
+    mode: incremental                  # full | incremental (WHERE process_batch_id = <batch_id>)
+    limit: 100000
+
+  # ELT: transform expressed as SQL run on the source (last SELECT = curated output).
+  transform:
+    - >
+      SELECT
+        request__transaction_id AS transaction_id,
+        request__event_time     AS event_time,
+        request__duration       AS duration
+      FROM mrm_log_flat.default.request
+      WHERE process_batch_id = '{{ batch_id }}'
+        AND request__transaction_id IS NOT NULL
+
+  target:
+    connection: analytics_snowflake
+    table: ANALYTICS.PUBLIC.REQUEST_CLEAN
+    mode: merge                        # append | overwrite | merge | none
+    keys: [transaction_id]
+
+  # Three quality gates (warn-and-continue; severity tags drive the report).
+  validate:
+    raw: config/suites/request_raw.example.yml
+    curated: config/suites/request_curated.example.yml
+    post: config/suites/request_post.example.yml
+
+  # Custom checks (native GE covers completeness + uniqueness in the suites).
+  checks:
+    - type: freshness
+      target: mrm_log_flat.default.request
+      timestamp_column: request__event_time
+      max_lag_hours: 6
+      severity: critical
+    - type: volume_drift
+      target: mrm_log_flat.default.request
+      tolerance: 0.25
+      window: 5
+      severity: warning
+    - type: schema_drift
+      target: mrm_log_flat.default.request
+      severity: warning
+
+  schedule: "0 6 * * *"                # cron-first: daily at 06:00

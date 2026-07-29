@@ -1,0 +1,27 @@
+# Gate 2 (curated): validate the transformed shape via a query asset.
+suite:
+  name: request_curated
+  asset:
+    type: query
+    name: request_curated
+    query: >
+      SELECT
+        request__transaction_id AS transaction_id,
+        request__duration       AS duration
+      FROM mrm_log_flat.default.request
+      WHERE request__transaction_id IS NOT NULL
+      LIMIT 10000
+
+expectations:
+  - type: expect_column_values_to_not_be_null
+    column: transaction_id
+    severity: critical
+
+  - type: expect_column_values_to_be_unique
+    column: transaction_id
+    severity: warning
+
+  - type: expect_column_values_to_be_between
+    column: duration
+    min_value: 0
+    severity: warning

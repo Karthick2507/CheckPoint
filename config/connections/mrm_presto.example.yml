@@ -1,0 +1,19 @@
+# Presto/Trino connection for the ETL framework.
+# Secrets come from the environment via ${VAR} interpolation.
+#
+#   export PRESTO_AUTH_TOKEN=cfeac6c3-...
+#
+# NOTE: reaching the production gateway requires VPN access.
+
+connection:
+  name: mrm_presto
+  type: presto
+  host: presto-gateway.presto.fw1.aws.fwmrm.net
+  port: 8080
+  user: ${PRESTO_USER}
+  catalog: mrm_log_flat
+  schema: default
+  http_scheme: https
+  request_timeout: 30
+  auth_token: ${PRESTO_AUTH_TOKEN}   # sent as "Authorization: Bearer <token>"
+  auth_header: Authorization

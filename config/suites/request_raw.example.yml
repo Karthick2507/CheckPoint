@@ -1,0 +1,16 @@
+# Gate 1 (raw): validate the source `request` table before transforming.
+suite:
+  name: request_raw
+  asset:
+    type: table
+    name: request
+    table_name: mrm_log_flat.default.request
+
+expectations:
+  - type: expect_column_to_exist
+    column: request__transaction_id
+    severity: critical
+
+  - type: expect_column_values_to_not_be_null
+    column: request__transaction_id
+    severity: critical
