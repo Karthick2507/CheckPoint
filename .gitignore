@@ -5,7 +5,8 @@ __pycache__/
 .venv/
 venv/
 
-# GE framework generated output
+# ETL framework generated output
+etl_output/
 ge_output/
 gx/
 uncommitted/
