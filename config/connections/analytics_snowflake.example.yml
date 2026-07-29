@@ -1,0 +1,18 @@
+# Snowflake connection (target / secondary source).
+# Demonstrates the multi-source design: switching `type` swaps the connector,
+# and validations run through the identical Great Expectations code path.
+#
+# Executing against a live Snowflake requires the `snowflake-sqlalchemy` driver.
+#
+#   export SNOWFLAKE_PASSWORD=...
+
+connection:
+  name: analytics_snowflake
+  type: snowflake
+  account: xy12345.us-east-1
+  user: ${SNOWFLAKE_USER}
+  auth_token: ${SNOWFLAKE_PASSWORD}
+  database: ANALYTICS
+  schema: PUBLIC
+  warehouse: ETL_WH
+  role: ETL_ROLE
