@@ -108,6 +108,8 @@ class Pipeline:
     def _validate(self, source: DataSource, suite_path: str, gate: str, result: "PipelineResult") -> None:
         suite = self.suite_loader(suite_path)
         outcome = GEValidationFramework(source).run(suite)
+        outcome.meta["gate"] = gate
+        outcome.meta["source"] = source.name
         result.validations.append(outcome)
         self.context.record(
             f"validate:{gate}",
