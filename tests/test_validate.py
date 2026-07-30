@@ -74,7 +74,8 @@ def test_suite_requires_expectations(tmp_path):
         load_suite_config(cfg)
 
 
-def test_severity_of_lookup():
+def test_severity_lookup_by_id():
+    """Severity resolves via the config-assigned id (see tests/test_severity.py)."""
     sc = SuiteConfig.from_dict(
         {
             "suite": {"name": "q", "asset": {"name": "t", "table_name": "t"}},
@@ -84,8 +85,8 @@ def test_severity_of_lookup():
             ],
         }
     )
-    assert sc.severity_of("expect_column_values_to_not_be_null", {"column": "id"}) == "critical"
-    assert sc.severity_of("expect_table_row_count_to_be_between", {"min_value": 1}) == "warning"
+    assert sc.severity_by_id(sc.expectations[0].id) == "critical"
+    assert sc.severity_by_id(sc.expectations[1].id) == "warning"
 
 
 # --------------------------------------------------------------------------

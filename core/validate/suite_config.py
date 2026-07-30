@@ -51,28 +51,55 @@ class AssetConfig:
         )
 
 
+# Key under which the framework stamps its own identity into a GE expectation's
+# ``meta``. GE round-trips ``meta`` onto the validation result, which is how a
+# result is matched back to the exact config entry that produced it.
+META_ID_KEY = "etl_expectation_id"
+
+
 @dataclass
 class ExpectationConfig:
     """A single expectation: its snake_case ``type``, kwargs, and severity.
 
     ``severity`` (``critical`` | ``warning``) drives the warn-and-continue
     reporting: it is recorded on every result but never blocks the run.
+
+    ``id`` is assigned when the suite is parsed and is carried through GE's
+    ``meta`` so each result maps back to *this* entry — matching on kwargs is
+    unreliable because GE normalises and augments them.
     """
 
     type: str
     kwargs: dict[str, Any] = field(default_factory=dict)
     severity: str = "warning"
+    id: str = ""
+    meta: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ExpectationConfig":
+    def from_dict(cls, data: dict[str, Any], index: int = 0) -> "ExpectationConfig":
         exp_type = data.get("type")
         if not exp_type:
             raise ValueError("Each expectation requires a 'type'")
         severity = str(data.get("severity") or "warning").lower()
         if severity not in ("critical", "warning"):
             raise ValueError(f"Invalid severity {severity!r} (expected 'critical' or 'warning')")
-        kwargs = {key: value for key, value in data.items() if key not in ("type", "severity")}
-        return cls(type=str(exp_type), kwargs=kwargs, severity=severity)
+        user_meta = data.get("meta") or {}
+        if not isinstance(user_meta, dict):
+            raise ValueError("Expectation 'meta' must be a mapping")
+        kwargs = {
+            key: value for key, value in data.items() if key not in ("type", "severity", "id", "meta")
+        }
+        return cls(
+            type=str(exp_type),
+            kwargs=kwargs,
+            severity=severity,
+            id=str(data.get("id") or f"{index}:{exp_type}"),
+            meta=dict(user_meta),
+        )
+
+    def build_meta(self) -> dict[str, Any]:
+        """User meta plus the framework's identity stamp."""
+        return {**self.meta, META_ID_KEY: self.id}
 
 
 @dataclass
@@ -94,9 +121,16 @@ class SuiteConfig:
         if not asset_data:
             raise ValueError("Suite config requires an 'asset' section")
 
-        expectations = [ExpectationConfig.from_dict(item) for item in (data.get("expectations") or [])]
+        expectations = [
+            ExpectationConfig.from_dict(item, index=index)
+            for index, item in enumerate(data.get("expectations") or [])
+        ]
         if not expectations:
             raise ValueError("Suite config requires at least one entry under 'expectations'")
+
+        duplicate_ids = {e.id for e in expectations if [x.id for x in expectations].count(e.id) > 1}
+        if duplicate_ids:
+            raise ValueError(f"Duplicate expectation id(s) in suite: {', '.join(sorted(duplicate_ids))}")
 
         return cls(
             name=str(name),
@@ -104,13 +138,16 @@ class SuiteConfig:
             expectations=expectations,
         )
 
-    def severity_of(self, expectation_type: str, kwargs: dict[str, Any]) -> str:
-        """Return the configured severity for a matching expectation (default warning)."""
+    def severity_by_id(self, expectation_id: str | None) -> str:
+        """Return the severity for the expectation carrying ``expectation_id``.
+
+        Falls back to ``warning`` (the safe default) when the id is absent or
+        unknown, e.g. for an expectation GE injected itself.
+        """
+        if not expectation_id:
+            return "warning"
         for cfg in self.expectations:
-            if cfg.type == expectation_type and cfg.kwargs == kwargs:
-                return cfg.severity
-        for cfg in self.expectations:  # fall back to a type-only match
-            if cfg.type == expectation_type:
+            if cfg.id == expectation_id:
                 return cfg.severity
         return "warning"
 

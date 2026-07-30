@@ -1,4 +1,10 @@
 # Gate 1 (raw): validate the source `request` table before transforming.
+#
+# Optional per-expectation fields:
+#   id       stable identifier used to map a result back to this entry (and to
+#            resolve its severity). Auto-assigned by position if omitted; set it
+#            explicitly so reordering the list does not change report identity.
+#   meta     arbitrary metadata carried through to the validation result.
 suite:
   name: request_raw
   asset:
@@ -7,10 +13,14 @@ suite:
     table_name: mrm_log_flat.default.request
 
 expectations:
-  - type: expect_column_to_exist
+  - id: pk_exists
+    type: expect_column_to_exist
     column: request__transaction_id
     severity: critical
 
-  - type: expect_column_values_to_not_be_null
+  - id: pk_not_null
+    type: expect_column_values_to_not_be_null
     column: request__transaction_id
     severity: critical
+    meta:
+      owner: data-engineering

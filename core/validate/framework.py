@@ -20,7 +20,7 @@ from typing import Any
 import great_expectations as gx
 
 from core.validate.expectations import build_expectations
-from core.validate.suite_config import AssetConfig, SuiteConfig
+from core.validate.suite_config import META_ID_KEY, AssetConfig, SuiteConfig
 from data_sources.base import DataSource
 
 
@@ -52,6 +52,7 @@ class ExpectationResultRow:
     unexpected_percent: float | None = None
     exception_message: str | None = None
     severity: str = "warning"
+    expectation_id: str | None = None
 
 
 @dataclass
@@ -95,6 +96,7 @@ class ValidationOutcome:
             "results": [
                 {
                     "expectation_type": row.expectation_type,
+                    "expectation_id": row.expectation_id,
                     "column": row.column,
                     "success": row.success,
                     "severity": row.severity,
@@ -117,6 +119,7 @@ class ValidationOutcome:
             config = getattr(item, "expectation_config", None)
             exp_type = getattr(config, "type", None) or "unknown"
             kwargs = dict(getattr(config, "kwargs", {}) or {})
+            meta = dict(getattr(config, "meta", {}) or {})
             result_detail = dict(getattr(item, "result", {}) or {})
             exc_info = getattr(item, "exception_info", {}) or {}
             rows.append(
@@ -124,6 +127,7 @@ class ValidationOutcome:
                     expectation_type=exp_type,
                     column=kwargs.get("column"),
                     success=bool(getattr(item, "success", False)),
+                    expectation_id=meta.get(META_ID_KEY),
                     kwargs=kwargs,
                     observed_value=result_detail.get("observed_value"),
                     unexpected_count=result_detail.get("unexpected_count"),
@@ -223,7 +227,8 @@ class GEValidationFramework:
             asset_name=suite_cfg.asset.name,
         )
         # Tag each result with the severity declared in the suite config so the
-        # warn-and-continue reporting can tier failures without blocking.
+        # warn-and-continue reporting can tier failures without blocking. The
+        # id round-tripped through GE meta identifies the exact config entry.
         for row in outcome.results:
-            row.severity = suite_cfg.severity_of(row.expectation_type, row.kwargs)
+            row.severity = suite_cfg.severity_by_id(row.expectation_id)
         return outcome
