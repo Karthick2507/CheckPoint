@@ -37,7 +37,13 @@ SOURCE ─► EXTRACT ─►[gate: raw]─► TRANSFORM ─►[gate: curated]─
 5. **Warn-and-continue** — nothing blocks the run; every failure is captured in a
    report, tagged `critical` or `warning`.
 6. **Observable & files-only** — each run writes a manifest, a warnings report,
-   and per-suite validation reports; baselines persist as files (no results DB).
+   per-suite validation reports and quarantined rows; baselines persist as
+   files (no results DB).
+7. **Set-based by default** — same-warehouse work is pushed down as
+   `INSERT … SELECT`; rows only enter Python for genuine cross-system moves,
+   and then in bounded chunks.
+8. **Scoped to the batch** — gates and drift checks measure the slice this run
+   processed, not all of history.
 
 ## 3. Layered architecture
 
@@ -50,21 +56,25 @@ etl_framework/
 │   ├── presto/            #   Presto/Trino connector (Bearer-token auth)
 │   └── snowflake/         #   Snowflake connector (proves multi-source design)
 ├── core/
-│   ├── extract/           # read rows (table/query, incremental by batch_id)
+│   ├── extract/           # read rows (table/query, incremental, streaming)
 │   ├── transform/         # ELT: ordered SQL steps run on the source
 │   ├── validate/          # Great Expectations (folded-in), source-agnostic
-│   ├── load/              # append / overwrite / merge into a target
+│   │   └── scoping.py     #   narrow an asset to the current batch
+│   ├── load/              # loader.py (rows) + pushdown.py (INSERT … SELECT)
 │   ├── pipeline_config.py # declarative PipelineConfig
 │   └── pipeline.py        # the orchestrator (extract→gates→transform→load)
 ├── quality/               # the 4 non-native checks
 │   ├── freshness.py
 │   ├── volume_drift.py
 │   ├── schema_drift.py
-│   └── referential.py
+│   ├── referential.py
+│   └── stats.py           # median / MAD — robust baselines
 ├── runtime/
 │   ├── run_context.py     # run_id / batch_id / lineage / output layout
-│   └── state.py           # file-based baselines (schema snapshots, row counts)
-├── reporting/             # manifest + warnings report + console
+│   ├── state.py           # durable baselines (atomic writes, flock, retention)
+│   ├── templating.py      # strict, sandboxed Jinja SQL rendering
+│   └── sql.py             # shared sql_literal / batch predicate helpers
+├── reporting/             # manifest + warnings report + quarantine + console
 ├── config/                # analyst-facing YAML
 │   ├── connections/       #   sources & targets
 │   ├── pipelines/         #   what runs, in what order
@@ -113,12 +123,20 @@ warehouse-aware logic. All run warn-and-continue.
 | Completeness | GE suite | `expect_column_values_to_not_be_null` |
 | Uniqueness | GE suite | `expect_column_values_to_be_unique` |
 | Freshness | `quality/freshness.py` | `MAX(ts)` vs `now()` lag threshold |
-| Volume-drift | `quality/volume_drift.py` | `COUNT(*)` vs rolling `FileState` baseline |
+| Volume-drift | `quality/volume_drift.py` | batch-scoped `COUNT(*)` vs **median** baseline (± tolerance) |
 | Schema-drift | `quality/schema_drift.py` | `describe()` vs saved schema snapshot |
 | Referential integrity | `quality/referential.py` | anti-join orphan count (ELT pushdown) |
 
-Freshness/volume/schema depend on `runtime.state.FileState` for their baselines —
-which is why "files only" still supports stateful checks.
+Volume/schema depend on `runtime.state.FileState` for their baselines.
+
+**Volume-drift is batch-scoped.** Counting the whole table is meaningless on an
+append-only warehouse — the total only grows, so the baseline chases it and a
+failed batch is invisible (100k historical rows + 0 new rows still counts
+~100k). Set `batch_key` on the check to count only this run's slice. The centre
+is the **median** (a mean is dragged by the very spikes it should catch), runs
+that fail are recorded as anomalies and excluded from later baselines, and the
+check reports "establishing baseline" until `min_history` observations exist
+rather than judging against one or two samples.
 
 ## 6. Warn-and-continue model
 
@@ -131,18 +149,34 @@ which is why "files only" still supports stateful checks.
   policy change (`Pipeline` already exposes `has_critical_failure`), not a
   redesign. The CLI's `--fail-on` uses it for the **exit code** only.
 
+Operational failures (a bad table, an auth error, a missing suite) are captured
+too: they become `StageError` entries rather than escaping `run()`, so a broken
+run still produces a manifest and a report naming the stage that failed.
+
 ## 7. Output (files only)
 
+Two roots, with different lifetimes — this distinction matters:
+
 ```
-etl_output/
-├── runs/<run_id>/
-│   ├── run_manifest.json          # full record + lineage + status
-│   ├── warnings_report.md         # the detailed warn capture (critical first)
-│   └── validation/<suite>_validation.json|md
-└── state/
-    ├── schema_snapshots/<source>__<table>.json   # schema-drift baseline
-    └── row_count_history/<source>__<table>.csv    # volume-drift baseline
+etl_output/                        # DISPOSABLE, per run (gitignored)
+└── runs/<run_id>/
+    ├── run_manifest.json          # full record + lineage + status
+    ├── warnings_report.md         # the detailed warn capture (critical first)
+    ├── validation/<suite>_validation.json|md
+    └── quarantine/<suite>__<expectation_id>.csv   # the offending rows
+                    └── ….sql      # query locating them, when GE supplies one
+
+state/                             # PERSISTENT, across runs (NOT gitignored)
+├── schema_snapshots/<source>__<table>.json   # schema-drift baseline
+└── row_count_history/<source>__<table>.csv    # volume-drift baseline
 ```
+
+**State must outlive the run.** It deliberately sits outside `etl_output/`:
+when baselines lived under that (gitignored, per-run) tree, every CI, cron, or
+container run started empty, so schema-drift and volume-drift reported "first
+observation" forever and could never detect anything. Point `--state-dir` at a
+durable volume, or commit it. Writes are atomic and flock-guarded so concurrent
+runs cannot corrupt a baseline, and history is capped by `max_history`.
 
 `run_id = <UTC timestamp>_<8 hex>`; `batch_id = (now − 24h)` rounded to the hour
 (matching the Presto batch partitioning already used on the source tables).
@@ -159,31 +193,62 @@ Engineers own the Python layers (`data_sources/`, `core/`, `quality/`,
 
 Secrets are `${ENV_VAR}` references, never literals.
 
-## 9. Execution flow
+All SQL in a pipeline (transform steps, source query, suite query assets,
+`batch_filter`) is rendered with Jinja against `batch_id`, `run_id`, `pipeline`,
+`env` and the pipeline's `vars`. Rendering is **strict**: an unknown `{{ name }}`
+fails the stage rather than producing a blank predicate that would silently
+match nothing and look like an empty batch.
 
-`Pipeline.run()`:
+## 9. Execution model
 
-1. **Extract** — build the source SELECT (incremental filter on `batch_key`), run it.
-2. **Gate: raw** — run `suite_raw` on the source + all custom checks.
-3. **Transform** — run the ELT SQL steps on the source; the last SELECT is the
-   curated payload.
-4. **Gate: curated** — run `suite_curated` (typically a query asset).
-5. **Load** — write the payload into the target (`append`/`overwrite`/`merge`).
-6. **Gate: post** — run `suite_post` on the target.
+How data moves is chosen by `execution: auto | rows | pushdown`:
 
-Returns a `PipelineResult` aggregating all `ValidationOutcome`s + `CheckResult`s,
-with `passed`, `has_critical_failure`, and `failure_count`.
+| Mode | What runs | Use for |
+|---|---|---|
+| **pushdown** | `INSERT INTO target SELECT …` in the warehouse; no rows enter Python | Same-warehouse work at any scale — cost independent of row count |
+| **rows** | read into Python, write back as `INSERT … VALUES` | Moving data *between* systems (Presto → Snowflake) |
+| **stream** | `fetchmany` chunks piped straight into the target | Large cross-system moves; memory bounded by `chunk_size`, not table size |
 
-## 10. Testing strategy
+`auto` picks pushdown when source and target are the same connection, else rows.
+Streaming is opt-in (`extract.stream`) and applies to the row path; it declines
+(recording why, never erroring) when a transform needs a materialized set or the
+load is destructive.
+
+**Load safety.** Destructive modes (`overwrite`, `merge`) refuse to run with an
+empty payload — a late upstream batch must not delete a table and put nothing
+back — unless `allow_empty: true`. Delete and insert run in one transaction, so
+a failure part-way rolls back; targets that cannot roll back (Trino/Presto over
+Hive-like connectors) declare `supports_transactions=False` and the load is
+reported with `atomic=False` rather than pretending.
+
+## 10. Execution flow
+
+`Pipeline.run()` — never raises:
+
+1. **Extract** — build the source SELECT (incremental filter on `batch_key`).
+   Pushdown skips materialization entirely.
+2. **Gate: raw** — `suite_raw` on the source + all custom checks.
+3. **Transform** — ELT SQL on the source; in pushdown the curated SELECT is
+   kept for `INSERT … SELECT` instead of being executed.
+4. **Gate: curated** — `suite_curated`.
+5. **Load** — into the target, unless an upstream stage failed.
+6. **Gate: post** — `suite_post` on the target.
+
+Each gate is narrowed to the current batch when its asset declares `batch_key`.
+Returns a `PipelineResult` aggregating `ValidationOutcome`s, `CheckResult`s and
+`StageError`s, with `passed`, `has_critical_failure`, and `failure_count`.
+
+## 11. Testing strategy
 
 The connector layer's SQL machinery is dialect-agnostic, so the **entire flow is
 exercised against a temporary sqlite database** — extract, transform, load
 (including cross-"source" loads), all three GE gates, the four custom checks, and
 report generation — **without needing a live Presto/Trino gateway**. Pure units
 (connection strings, config parsing, expectation factory, exit-code policy) are
-tested directly. Current coverage: **74 tests**.
+tested directly, and every P0-P2 fix ships with a test that first reproduces
+the original defect. Current coverage: **232 tests**.
 
-## 11. Decisions log (locked)
+## 12. Decisions log (locked)
 
 | Decision | Choice |
 |---|---|
@@ -196,10 +261,8 @@ tested directly. Current coverage: **74 tests**.
 | Sources | Multi-source; Presto first, Snowflake + others pluggable under `data_sources/` |
 | GE placement | Folded into `core/validate/`, source-agnostic |
 
-## 12. Future extensions
+## 13. Future extensions
 
 - Airflow / Dagster wrappers over the same CLI (core is orchestrator-agnostic).
-- Row-level quarantine (`etl_output/runs/<id>/quarantine/`) for bad-row capture.
-- `INSERT … SELECT` pushdown load for in-warehouse, TiB-scale moves.
 - Additional connectors (BigQuery, Databricks, Postgres) — one folder each.
 - GE Data Docs generation as an optional report format.

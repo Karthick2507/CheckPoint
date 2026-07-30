@@ -27,10 +27,22 @@ class SourceSpec:
 class ExtractSpec:
     mode: str = "full"  # full | incremental
     limit: int | None = None
+    # Stream rows in chunks instead of materializing the whole result set.
+    # Applies to the row-based (cross-system) path only.
+    stream: bool = False
+    chunk_size: int = 10_000
 
     @property
     def incremental(self) -> bool:
         return self.mode.lower() == "incremental"
+
+
+# How the pipeline moves data:
+#   "rows"     — read into Python and INSERT … VALUES (cross-system moves)
+#   "pushdown" — INSERT … SELECT executed in the warehouse (same-warehouse, any scale)
+#   "auto"     — pushdown when source and target are the same connection and a
+#                transform SELECT exists, otherwise rows
+EXECUTION_MODES = ("auto", "rows", "pushdown")
 
 
 @dataclass
@@ -39,6 +51,9 @@ class TargetSpec:
     table: str | None = None
     mode: str = "append"  # append | overwrite | merge | none
     keys: list[str] = field(default_factory=list)
+    # Opt in to a destructive load (overwrite/merge) with an empty payload.
+    # Off by default so a missing upstream batch cannot wipe the target.
+    allow_empty: bool = False
 
 
 @dataclass
@@ -54,6 +69,10 @@ class PipelineConfig:
     suite_post: str | None = None
     checks: list[dict[str, Any]] = field(default_factory=list)
     schedule: str | None = None
+    # User-defined variables exposed to SQL templates alongside batch_id/run_id.
+    vars: dict[str, Any] = field(default_factory=dict)
+    # How data moves: auto | rows | pushdown (see EXECUTION_MODES).
+    execution: str = "auto"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PipelineConfig":
@@ -78,6 +97,8 @@ class PipelineConfig:
         extract = ExtractSpec(
             mode=str(extract_data.get("mode") or "full"),
             limit=extract_data.get("limit"),
+            stream=bool(extract_data.get("stream") or False),
+            chunk_size=int(extract_data.get("chunk_size") or 10_000),
         )
 
         transform = list(pipeline.get("transform") or [])
@@ -90,6 +111,13 @@ class PipelineConfig:
                 table=target_data.get("table"),
                 mode=str(target_data.get("mode") or "append"),
                 keys=list(target_data.get("keys") or []),
+                allow_empty=bool(target_data.get("allow_empty") or False),
+            )
+
+        execution = str(pipeline.get("execution") or "auto").lower()
+        if execution not in EXECUTION_MODES:
+            raise ValueError(
+                f"Invalid execution mode {execution!r} (expected one of {', '.join(EXECUTION_MODES)})"
             )
 
         validate = pipeline.get("validate") or {}
@@ -105,6 +133,8 @@ class PipelineConfig:
             suite_post=validate.get("post"),
             checks=list(pipeline.get("checks") or []),
             schedule=pipeline.get("schedule"),
+            vars=dict(pipeline.get("vars") or {}),
+            execution=execution,
         )
 
 

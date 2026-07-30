@@ -15,6 +15,11 @@ from core.validate.framework import (
     GEValidationFramework,
     ValidationOutcome,
 )
+from core.validate.scoping import (
+    build_batch_predicate,
+    scope_asset_to_batch,
+    scope_suite_to_batch,
+)
 from core.validate.reporting import (
     render_console,
     write_json_report,
@@ -38,6 +43,9 @@ __all__ = [
     "load_suite_config",
     "build_expectation",
     "expectation_class_name",
+    "scope_suite_to_batch",
+    "scope_asset_to_batch",
+    "build_batch_predicate",
     "render_console",
     "write_json_report",
     "write_markdown_report",

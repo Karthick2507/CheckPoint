@@ -13,6 +13,23 @@ pipeline:
   name: request_daily
   env: prod
 
+  # How data moves:
+  #   auto     (default) pushdown when source and target are the same
+  #            connection, otherwise rows
+  #   pushdown INSERT … SELECT run in the warehouse — no rows travel through
+  #            Python, so cost is independent of row count. Use for
+  #            same-warehouse work at TiB scale.
+  #   rows     read into Python and INSERT … VALUES. Required for moving data
+  #            BETWEEN systems (e.g. Presto -> Snowflake), as configured below.
+  execution: auto
+
+  # Variables available to every SQL template below, alongside the built-ins
+  # {{ batch_id }}, {{ run_id }}, {{ pipeline }} and {{ env }}.
+  # Rendering is strict: an unknown {{ name }} fails the stage rather than
+  # silently rendering empty and scanning/returning the wrong rows.
+  vars:
+    min_duration: 0
+
   source:
     connection: mrm_presto
     table: mrm_log_flat.default.request
@@ -50,12 +67,20 @@ pipeline:
     - type: freshness
       target: mrm_log_flat.default.request
       timestamp_column: request__event_time
+      # Scope to the batch: unscoped, MAX(ts) over the whole table finds any
+      # fresher historical row and a month-old batch looks perfectly healthy.
+      batch_key: process_batch_id
       max_lag_hours: 6
       severity: critical
     - type: volume_drift
       target: mrm_log_flat.default.request
-      tolerance: 0.25
-      window: 5
+      # Count THIS batch, not the whole table. On an append-only table the
+      # total only grows, so an unscoped count can never see a failed batch
+      # (100k historical rows + 0 new rows still counts ~100k).
+      batch_key: process_batch_id
+      tolerance: 0.25          # allowed deviation from the median baseline
+      window: 5                # observations forming the baseline
+      min_history: 3           # judge nothing until this many exist
       severity: warning
     - type: schema_drift
       target: mrm_log_flat.default.request

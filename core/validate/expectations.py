@@ -28,6 +28,10 @@ def expectation_class_name(exp_type: str) -> str:
 def build_expectation(cfg: ExpectationConfig) -> gxe.Expectation:
     """Instantiate the GE expectation described by ``cfg``.
 
+    The config's identity is stamped into GE ``meta`` so the resulting
+    validation row can be mapped back to this exact entry (see
+    :data:`~core.validate.suite_config.META_ID_KEY`).
+
     Raises a helpful ``ValueError`` when the type is unknown or the kwargs do
     not match the expectation's schema, so config mistakes fail fast.
     """
@@ -39,7 +43,7 @@ def build_expectation(cfg: ExpectationConfig) -> gxe.Expectation:
             "See https://greatexpectations.io/expectations for available expectations."
         )
     try:
-        return expectation_cls(**cfg.kwargs)
+        return expectation_cls(**cfg.kwargs, meta=cfg.build_meta())
     except Exception as exc:  # pydantic ValidationError, TypeError, ...
         raise ValueError(f"Invalid arguments for expectation {cfg.type!r}: {exc}") from exc
 

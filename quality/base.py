@@ -67,14 +67,53 @@ def normalize_columns(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
 
 
 class QualityCheck(ABC):
-    """A custom quality check bound to a target table/asset."""
+    """A custom quality check bound to a target table/asset.
+
+    **Batch scoping.** Set ``batch_key`` (the partition column) or
+    ``batch_filter`` (arbitrary, templated) and the check measures only the
+    slice this run processed. Without it a check reads all history, which is
+    both slower every run and frequently wrong: a stale batch hides behind a
+    fresher historical row, and one historical violation fails every future run
+    forever.
+    """
 
     check: str = "check"
     dimension: str = "quality"
 
-    def __init__(self, target: str, severity: str = "warning") -> None:
+    def __init__(
+        self,
+        target: str,
+        severity: str = "warning",
+        batch_key: str | None = None,
+        batch_filter: str | None = None,
+    ) -> None:
         self.target = target
         self.severity = severity
+        self.batch_key = batch_key
+        self.batch_filter = batch_filter
+
+    @property
+    def is_batch_scoped(self) -> bool:
+        return bool(self.batch_key or self.batch_filter)
+
+    def batch_predicate(
+        self,
+        batch_id: Any = None,
+        template_context: dict[str, Any] | None = None,
+        alias: str | None = None,
+    ) -> str | None:
+        """The WHERE predicate for this check's batch, if it is scoped.
+
+        ``alias`` qualifies the column for use inside a join.
+        """
+        from runtime.sql import build_batch_predicate
+
+        key = f"{alias}.{self.batch_key}" if (alias and self.batch_key) else self.batch_key
+        return build_batch_predicate(key, batch_id, self.batch_filter, template_context)
+
+    def scope_note(self) -> str:
+        """Human-readable note about what the check measured."""
+        return "batch-scoped" if self.is_batch_scoped else "WHOLE TABLE (set batch_key to scope)"
 
     @abstractmethod
     def run(self, source: Any, state: Any | None = None) -> CheckResult:

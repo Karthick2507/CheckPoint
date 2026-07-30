@@ -20,7 +20,7 @@ from typing import Any
 import great_expectations as gx
 
 from core.validate.expectations import build_expectations
-from core.validate.suite_config import AssetConfig, SuiteConfig
+from core.validate.suite_config import META_ID_KEY, AssetConfig, SuiteConfig
 from data_sources.base import DataSource
 
 
@@ -52,6 +52,10 @@ class ExpectationResultRow:
     unexpected_percent: float | None = None
     exception_message: str | None = None
     severity: str = "warning"
+    expectation_id: str | None = None
+    # Full GE result payload, kept so the quarantine writer can recover the
+    # offending values without re-querying the warehouse. Not serialized.
+    result_detail: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -95,6 +99,7 @@ class ValidationOutcome:
             "results": [
                 {
                     "expectation_type": row.expectation_type,
+                    "expectation_id": row.expectation_id,
                     "column": row.column,
                     "success": row.success,
                     "severity": row.severity,
@@ -117,6 +122,7 @@ class ValidationOutcome:
             config = getattr(item, "expectation_config", None)
             exp_type = getattr(config, "type", None) or "unknown"
             kwargs = dict(getattr(config, "kwargs", {}) or {})
+            meta = dict(getattr(config, "meta", {}) or {})
             result_detail = dict(getattr(item, "result", {}) or {})
             exc_info = getattr(item, "exception_info", {}) or {}
             rows.append(
@@ -124,10 +130,12 @@ class ValidationOutcome:
                     expectation_type=exp_type,
                     column=kwargs.get("column"),
                     success=bool(getattr(item, "success", False)),
+                    expectation_id=meta.get(META_ID_KEY),
                     kwargs=kwargs,
                     observed_value=result_detail.get("observed_value"),
                     unexpected_count=result_detail.get("unexpected_count"),
                     unexpected_percent=result_detail.get("unexpected_percent"),
+                    result_detail=result_detail,
                     exception_message=(exc_info.get("exception_message") if isinstance(exc_info, dict) else None),
                 )
             )
@@ -171,13 +179,33 @@ class GEValidationFramework:
             kwargs=self.data_source.engine_kwargs(),
         )
 
+    @staticmethod
+    def _asset_matches(asset: Any, asset_cfg: AssetConfig) -> bool:
+        """Whether a registered GE asset really is the one the config describes."""
+        if asset_cfg.type == "query":
+            return getattr(asset, "query", None) == asset_cfg.query
+        return getattr(asset, "table_name", None) == asset_cfg.table_name
+
     def _get_or_create_asset(self, source: Any, asset_cfg: AssetConfig) -> Any:
         existing = {a.name: a for a in getattr(source, "assets", [])}
-        if asset_cfg.name in existing:
-            return existing[asset_cfg.name]
+        candidate = existing.get(asset_cfg.name)
+        if candidate is not None and self._asset_matches(candidate, asset_cfg):
+            return candidate
+
+        # The context is shared across gates, so two suites can legitimately use
+        # the same asset NAME for different data (e.g. a raw table and its
+        # batch-scoped query). Registering under a discriminated name keeps them
+        # distinct instead of silently validating whichever was created first.
+        name = asset_cfg.name
+        if candidate is not None:
+            definition = asset_cfg.query if asset_cfg.type == "query" else asset_cfg.table_name
+            name = f"{asset_cfg.name}__{abs(hash(definition)) % 10**8}"
+            if name in existing:
+                return existing[name]
+
         if asset_cfg.type == "query":
-            return source.add_query_asset(name=asset_cfg.name, query=asset_cfg.query)
-        kwargs: dict[str, Any] = {"name": asset_cfg.name, "table_name": asset_cfg.table_name}
+            return source.add_query_asset(name=name, query=asset_cfg.query)
+        kwargs: dict[str, Any] = {"name": name, "table_name": asset_cfg.table_name}
         if asset_cfg.schema_name:
             kwargs["schema_name"] = asset_cfg.schema_name
         return source.add_table_asset(**kwargs)
@@ -223,7 +251,8 @@ class GEValidationFramework:
             asset_name=suite_cfg.asset.name,
         )
         # Tag each result with the severity declared in the suite config so the
-        # warn-and-continue reporting can tier failures without blocking.
+        # warn-and-continue reporting can tier failures without blocking. The
+        # id round-tripped through GE meta identifies the exact config entry.
         for row in outcome.results:
-            row.severity = suite_cfg.severity_of(row.expectation_type, row.kwargs)
+            row.severity = suite_cfg.severity_by_id(row.expectation_id)
         return outcome

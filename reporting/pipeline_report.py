@@ -24,6 +24,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from core.validate.reporting import write_reports
+from reporting.quarantine import write_run_quarantine
 
 if TYPE_CHECKING:  # avoid a runtime import cycle
     from core.pipeline import PipelineResult
@@ -41,8 +42,23 @@ class WarnRow:
 
 
 def collect_warnings(result: "PipelineResult") -> list[WarnRow]:
-    """Flatten every failure across validation gates and custom checks."""
+    """Flatten every failure: operational errors, validation gates, and checks."""
     rows: list[WarnRow] = []
+
+    # Operational failures first — a stage that did not run outranks any
+    # expectation result, because the run did not do its job.
+    for error in getattr(result, "errors", []):
+        rows.append(
+            WarnRow(
+                gate=error.stage,
+                severity="critical",
+                dimension="operational",
+                target=result.pipeline,
+                subject=error.error_type,
+                observed=None,
+                detail=error.message,
+            )
+        )
 
     for outcome in result.validations:
         gate = str(outcome.meta.get("gate", "?"))
@@ -79,6 +95,35 @@ def collect_warnings(result: "PipelineResult") -> list[WarnRow]:
             )
         )
 
+    # A refused destructive load is an operational event the operator must see.
+    load = result.load
+    if load is not None and load.skipped and load.reason and load.mode in ("overwrite", "merge"):
+        rows.append(
+            WarnRow(
+                gate="load",
+                severity="critical",
+                dimension="load",
+                target=load.target,
+                subject=f"{load.mode}_skipped",
+                observed=0,
+                detail=load.reason,
+            )
+        )
+
+    # A destructive load that could not be made atomic is a durability risk.
+    if load is not None and not load.skipped and not load.atomic and load.mode in ("overwrite", "merge"):
+        rows.append(
+            WarnRow(
+                gate="load",
+                severity="warning",
+                dimension="load",
+                target=load.target,
+                subject="non_atomic_load",
+                observed=load.inserted,
+                detail=load.reason or f"'{load.mode}' load was not atomic on this target",
+            )
+        )
+
     # critical first, then by gate
     rows.sort(key=lambda r: (r.severity != "critical", r.gate))
     return rows
@@ -94,7 +139,14 @@ def write_run_manifest(result: "PipelineResult") -> Path:
     ctx.ensure_dirs()
     path = ctx.run_dir / "run_manifest.json"
     payload = result.to_dict()
-    payload["status"] = "passed" if result.passed else ("critical" if result.has_critical_failure else "warning")
+    if result.passed:
+        payload["status"] = "passed"
+    elif getattr(result, "errors", []):
+        payload["status"] = "error"
+    elif result.has_critical_failure:
+        payload["status"] = "critical"
+    else:
+        payload["status"] = "warning"
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return path
 
@@ -117,18 +169,31 @@ def write_validation_reports(result: "PipelineResult") -> list[Path]:
 
 
 def write_pipeline_reports(result: "PipelineResult") -> dict[str, Any]:
-    """Write manifest + warnings + per-suite validation reports for a run."""
+    """Write manifest, warnings, validation reports and quarantine for a run."""
     manifest = write_run_manifest(result)
     warnings = write_warnings_report(result)
     validations = write_validation_reports(result)
-    return {"manifest": manifest, "warnings": warnings, "validations": validations}
+    quarantine = write_run_quarantine(result)
+    return {
+        "manifest": manifest,
+        "warnings": warnings,
+        "validations": validations,
+        "quarantine": quarantine,
+    }
 
 
 def _warnings_markdown(result: "PipelineResult") -> str:
     ctx = result.context
     warnings = collect_warnings(result)
     critical = [w for w in warnings if w.severity == "critical"]
-    status = "✅ PASSED" if result.passed else ("🔴 CRITICAL" if result.has_critical_failure else "🟡 WARNINGS")
+    if result.passed:
+        status = "✅ PASSED"
+    elif getattr(result, "errors", []):
+        status = "⛔ ERROR"
+    elif result.has_critical_failure:
+        status = "🔴 CRITICAL"
+    else:
+        status = "🟡 WARNINGS"
 
     lines: list[str] = [
         f"# Warnings Report — `{result.pipeline}`",
@@ -146,6 +211,18 @@ def _warnings_markdown(result: "PipelineResult") -> str:
     if not warnings:
         lines += ["No failures — all validation gates and checks passed. 🎉", ""]
         return "\n".join(lines) + "\n"
+
+    errors = getattr(result, "errors", [])
+    if errors:
+        lines += [
+            "## ⛔ Operational errors (the run did not complete normally)",
+            "",
+            "| Stage | Error | Message |",
+            "|:------|:------|:--------|",
+        ]
+        for error in errors:
+            lines.append(f"| `{error.stage}` | `{error.error_type}` | {error.message} |")
+        lines.append("")
 
     lines += [
         "## All failures",
@@ -182,9 +259,10 @@ def _warnings_markdown(result: "PipelineResult") -> str:
 
 def render_pipeline_console(result: "PipelineResult", console: Console | None = None) -> None:
     console = console or Console()
-    passed = result.passed
-    if passed:
+    if result.passed:
         color, status = "green", "PASSED"
+    elif getattr(result, "errors", []):
+        color, status = "red", "ERROR — run did not complete"
     elif result.has_critical_failure:
         color, status = "red", "CRITICAL FAILURE"
     else:
@@ -209,6 +287,9 @@ def render_pipeline_console(result: "PipelineResult", console: Console | None = 
     table.add_column("Suite / Check")
     table.add_column("Detail")
 
+    for error in getattr(result, "errors", []):
+        table.add_row(error.stage, "[red]⛔[/red]", error.error_type, error.message)
+
     for outcome in result.validations:
         mark = "[green]✓[/green]" if outcome.success else "[red]✗[/red]"
         table.add_row(
@@ -221,5 +302,5 @@ def render_pipeline_console(result: "PipelineResult", console: Console | None = 
         mark = "[green]✓[/green]" if check.success else ("[red]✗[/red]" if check.severity == "critical" else "[yellow]![/yellow]")
         table.add_row("check", mark, check.check, check.details)
 
-    if result.validations or result.checks:
+    if result.validations or result.checks or getattr(result, "errors", []):
         console.print(table)

@@ -22,7 +22,16 @@ class SchemaDriftCheck(QualityCheck):
         super().__init__(target, severity)
         self.update_on_success = update_on_success
 
-    def run(self, source: Any, state: Any | None = None) -> Any:
+    def run(
+        self,
+        source: Any,
+        state: Any | None = None,
+        batch_id: Any = None,
+        template_context: dict[str, Any] | None = None,
+    ) -> Any:
+        # Schema is a property of the table, not of a batch, so the batch
+        # arguments are accepted for a uniform call signature and ignored.
+        del batch_id, template_context
         current = normalize_columns(source.describe(self.target))
         current_map = {col["name"]: col["type"] for col in current}
 
