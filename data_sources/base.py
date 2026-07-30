@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import sys
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 
 @dataclass
@@ -25,6 +26,26 @@ class Capabilities:
     dialect: str
     supports_pushdown: bool = True
     identifier_quote: str = '"'
+    # Whether multi-statement work can be made atomic. Warehouses such as
+    # Trino/Presto (over Hive-like connectors) cannot roll back a DELETE, so
+    # callers must be told when atomicity is unavailable rather than assume it.
+    supports_transactions: bool = True
+
+
+class Transaction:
+    """Runs statements on a single connection inside one transaction."""
+
+    def __init__(self, cursor: Any) -> None:
+        self._cursor = cursor
+        self.statements: list[str] = []
+
+    def execute(self, sql: str) -> list[dict[str, Any]]:
+        self.statements.append(sql)
+        self._cursor.execute(sql)
+        if self._cursor.description is None:
+            return []
+        columns = [column[0] for column in self._cursor.description]
+        return [dict(zip(columns, row)) for row in self._cursor.fetchall()]
 
 
 class DataSource(ABC):
@@ -70,6 +91,10 @@ class DataSource(ABC):
 
         Uses a raw DBAPI cursor so it works uniformly across dialects.
         Statements with no result set return ``[]``.
+
+        A write that cannot be committed **raises** — a silently dropped commit
+        is indistinguishable from a successful load and would corrupt the run's
+        reported results.
         """
         engine = self.get_engine()
         connection = engine.raw_connection()
@@ -79,11 +104,11 @@ class DataSource(ABC):
             cursor.execute(sql)
             if cursor.description is None:
                 # DML/DDL (INSERT/DELETE/CREATE ...): commit so writes persist.
-                self._commit(connection)
+                connection.commit()
                 return []
             columns = [column[0] for column in cursor.description]
             rows = cursor.fetchall()
-            self._commit(connection)
+            # Read paths need no commit; closing releases the connection.
             return [dict(zip(columns, row)) for row in rows]
         finally:
             if cursor is not None:
@@ -96,13 +121,40 @@ class DataSource(ABC):
             except Exception as exc:  # pragma: no cover - defensive cleanup
                 print(f"Warning: failed to close connection cleanly: {exc}", file=sys.stderr)
 
-    @staticmethod
-    def _commit(connection: Any) -> None:
-        """Commit a raw connection, tolerating drivers/queries that can't."""
+    @contextmanager
+    def transaction(self) -> Iterator[Transaction]:
+        """Run several statements atomically on one connection.
+
+        Commits on clean exit; rolls back and re-raises on any exception. On
+        sources that cannot roll back (see ``Capabilities.supports_transactions``)
+        the rollback is best-effort — callers should consult the capability and
+        report when atomicity could not be guaranteed.
+        """
+        engine = self.get_engine()
+        connection = engine.raw_connection()
+        cursor = None
         try:
-            connection.commit()
-        except Exception:  # pragma: no cover - some read paths/dialects no-op
-            pass
+            cursor = connection.cursor()
+            tx = Transaction(cursor)
+            try:
+                yield tx
+                connection.commit()
+            except Exception:
+                try:
+                    connection.rollback()
+                except Exception as exc:  # pragma: no cover - source cannot roll back
+                    print(f"Warning: rollback failed ({exc}); target may be inconsistent", file=sys.stderr)
+                raise
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception as exc:  # pragma: no cover - defensive cleanup
+                    print(f"Warning: failed to close cursor cleanly: {exc}", file=sys.stderr)
+            try:
+                connection.close()
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                print(f"Warning: failed to close connection cleanly: {exc}", file=sys.stderr)
 
     # -- schema introspection --------------------------------------------
 

@@ -66,4 +66,12 @@ class PrestoDataSource(DataSource):
         return {"connect_args": connect_args}
 
     def capabilities(self) -> Capabilities:
-        return Capabilities(dialect="presto", supports_pushdown=True, identifier_quote='"')
+        # Trino/Presto over Hive-like connectors cannot roll back DML, so a
+        # delete+insert load here is NOT atomic. Declared honestly so the loader
+        # can flag it rather than silently pretend otherwise.
+        return Capabilities(
+            dialect="presto",
+            supports_pushdown=True,
+            identifier_quote='"',
+            supports_transactions=False,
+        )

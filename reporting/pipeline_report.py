@@ -94,6 +94,20 @@ def collect_warnings(result: "PipelineResult") -> list[WarnRow]:
             )
         )
 
+    # A destructive load that could not be made atomic is a durability risk.
+    if load is not None and not load.skipped and not load.atomic and load.mode in ("overwrite", "merge"):
+        rows.append(
+            WarnRow(
+                gate="load",
+                severity="warning",
+                dimension="load",
+                target=load.target,
+                subject="non_atomic_load",
+                observed=load.inserted,
+                detail=load.reason or f"'{load.mode}' load was not atomic on this target",
+            )
+        )
+
     # critical first, then by gate
     rows.sort(key=lambda r: (r.severity != "critical", r.gate))
     return rows

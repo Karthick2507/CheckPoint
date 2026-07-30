@@ -8,6 +8,13 @@ Modes:
                   (delete+insert upsert; supports single or composite keys).
 * ``none``      — skip loading (validation-only pipelines).
 
+**Atomicity.** The delete and the insert of a destructive load run inside a
+single transaction (:meth:`DataSource.transaction`), so a failure part-way
+rolls back rather than leaving the target with rows deleted and nothing put
+back. Sources that cannot roll back (Trino/Presto over Hive-like connectors)
+declare ``supports_transactions=False``; the load still runs but is reported
+with ``atomic=False`` so the operator knows the guarantee did not apply.
+
 **Empty-payload guard.** ``overwrite`` and ``merge`` are destructive: they delete
 before they insert. If the payload is empty — a late or missing upstream batch,
 a transform that filtered everything out, a failed extract — deleting would wipe
@@ -43,6 +50,9 @@ class LoadResult:
     deleted: int = 0
     skipped: bool = False
     reason: str = ""
+    # False when the source cannot roll back, i.e. a mid-load failure could
+    # leave the target partially written. Surfaced in the run report.
+    atomic: bool = True
 
 
 def sql_literal(value: Any) -> str:
@@ -82,30 +92,47 @@ class Loader:
                 ),
             )
 
-        deleted = 0
-        if mode == "overwrite":
-            target.execute(f"DELETE FROM {table}")
-        elif mode == "merge":
-            deleted = self._delete_matching(target, table, rows, keys)
-        elif mode != "append":
+        if mode not in ("append",) + DESTRUCTIVE_MODES:
             raise ValueError(f"Unsupported load mode: {mode!r}")
+        if mode == "merge" and rows and not keys:
+            raise ValueError("merge load mode requires 'keys'")
 
-        inserted = self._insert(target, table, rows)
-        return LoadResult(target=table, mode=mode, inserted=inserted, deleted=deleted)
+        atomic = bool(target.capabilities().supports_transactions)
 
-    # -- internals -------------------------------------------------------
+        # Delete and insert must land together: a failure between them would
+        # otherwise delete rows and never put them back.
+        with target.transaction() as tx:
+            deleted = 0
+            if mode == "overwrite":
+                tx.execute(f"DELETE FROM {table}")
+            elif mode == "merge":
+                deleted = self._delete_matching(tx, table, rows, keys)
+            inserted = self._insert(tx, table, rows)
+
+        return LoadResult(
+            target=table,
+            mode=mode,
+            inserted=inserted,
+            deleted=deleted,
+            atomic=atomic,
+            reason=(
+                ""
+                if atomic
+                else f"target does not support transactions; '{mode}' load was not atomic"
+            ),
+        )
+
+    # -- internals (operate on a Transaction, not the DataSource) ---------
 
     def _delete_matching(
         self,
-        target: DataSource,
+        tx: Any,
         table: str,
         rows: Sequence[dict[str, Any]],
         keys: Sequence[str] | None,
     ) -> int:
-        if not rows:
+        if not rows or not keys:
             return 0
-        if not keys:
-            raise ValueError("merge load mode requires 'keys'")
         deleted = 0
         for batch in _chunks(rows, _INSERT_BATCH):
             conditions = []
@@ -113,12 +140,11 @@ class Loader:
                 clause = " AND ".join(f"{key} = {sql_literal(row.get(key))}" for key in keys)
                 conditions.append(f"({clause})")
             where = " OR ".join(conditions)
-            result = target.execute(f"DELETE FROM {table} WHERE {where}")
-            deleted += 0  # row count not reliably returned across DBAPIs
-            del result
+            tx.execute(f"DELETE FROM {table} WHERE {where}")
+            deleted += len(batch)  # keys targeted for replacement
         return deleted
 
-    def _insert(self, target: DataSource, table: str, rows: Sequence[dict[str, Any]]) -> int:
+    def _insert(self, tx: Any, table: str, rows: Sequence[dict[str, Any]]) -> int:
         if not rows:
             return 0
         columns = list(rows[0].keys())
@@ -128,7 +154,7 @@ class Loader:
             values_sql = ", ".join(
                 "(" + ", ".join(sql_literal(row.get(col)) for col in columns) + ")" for row in batch
             )
-            target.execute(f"INSERT INTO {table} ({col_list}) VALUES {values_sql}")
+            tx.execute(f"INSERT INTO {table} ({col_list}) VALUES {values_sql}")
             inserted += len(batch)
         return inserted
 
