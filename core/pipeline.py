@@ -22,6 +22,7 @@ free of YAML/IO concerns (the CLI wires those in).
 
 from __future__ import annotations
 
+import sys
 import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -146,6 +147,37 @@ class Pipeline:
         self.transformer = Transformer()
         self.loader = Loader()
         self.pushdown_loader = PushdownLoader()
+        # One GE context for the whole run: building a fresh ephemeral context
+        # per gate re-registered the datasource and opened a new engine each
+        # time. Created lazily so a pipeline with no gates pays nothing.
+        self._ge_context: Any = None
+        self._resolved: dict[str, DataSource] = {}
+
+    # -- resources ---------------------------------------------------------
+
+    def ge_context(self) -> Any:
+        """The single Great Expectations context shared by every gate."""
+        if self._ge_context is None:
+            import great_expectations as gx
+
+            self._ge_context = gx.get_context(mode="ephemeral")
+        return self._ge_context
+
+    def _source(self, connection: str) -> DataSource:
+        """Resolve a connection once per run and remember it for disposal."""
+        if connection not in self._resolved:
+            self._resolved[connection] = self.resolve_source(connection)
+        return self._resolved[connection]
+
+    def dispose(self) -> None:
+        """Release engines held by every source this run touched."""
+        for source in self._resolved.values():
+            try:
+                source.dispose()
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                print(f"Warning: failed to dispose {source.name}: {exc}", file=sys.stderr)
+        self._resolved.clear()
+        self._ge_context = None
 
     # -- execution strategy ------------------------------------------------
 
@@ -234,7 +266,7 @@ class Pipeline:
             # Narrow the asset to the current batch when the suite asks for it,
             # so the gate validates this run's slice rather than all history.
             scoped = scope_suite_to_batch(suite, self.context.batch_id, template_context)
-            outcome = GEValidationFramework(source).run(scoped)
+            outcome = GEValidationFramework(source, context=self.ge_context()).run(scoped)
             if scoped is not suite:
                 outcome.meta["batch_scoped"] = True
                 outcome.meta["batch_id"] = self.context.batch_id
@@ -284,7 +316,17 @@ class Pipeline:
     # -- execution -------------------------------------------------------
 
     def run(self) -> PipelineResult:
-        """Execute the pipeline. Never raises — failures are recorded."""
+        """Execute the pipeline. Never raises — failures are recorded.
+
+        Connections are released on the way out however the run ends, so a
+        long-lived scheduler process does not accumulate engines and pools.
+        """
+        try:
+            return self._run()
+        finally:
+            self.dispose()
+
+    def _run(self) -> PipelineResult:
         cfg = self.config
         result = PipelineResult(pipeline=cfg.name, run_id=self.context.run_id, context=self.context)
 
@@ -295,7 +337,7 @@ class Pipeline:
 
         # Resolve the source. Without it nothing downstream can run.
         try:
-            source = self.resolve_source(cfg.source.connection)
+            source = self._source(cfg.source.connection)
         except Exception as exc:
             self._fail(result, "resolve_source", exc)
             self._record_complete(result)
@@ -378,7 +420,7 @@ class Pipeline:
         elif wants_load:
             target = None
             try:
-                target = self.resolve_source(cfg.target.connection)
+                target = self._source(cfg.target.connection)
                 if streaming:
                     _, chunks = self.extractor.stream(
                         source, query=source_sql, chunk_size=cfg.extract.chunk_size

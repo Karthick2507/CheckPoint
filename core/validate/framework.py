@@ -179,13 +179,33 @@ class GEValidationFramework:
             kwargs=self.data_source.engine_kwargs(),
         )
 
+    @staticmethod
+    def _asset_matches(asset: Any, asset_cfg: AssetConfig) -> bool:
+        """Whether a registered GE asset really is the one the config describes."""
+        if asset_cfg.type == "query":
+            return getattr(asset, "query", None) == asset_cfg.query
+        return getattr(asset, "table_name", None) == asset_cfg.table_name
+
     def _get_or_create_asset(self, source: Any, asset_cfg: AssetConfig) -> Any:
         existing = {a.name: a for a in getattr(source, "assets", [])}
-        if asset_cfg.name in existing:
-            return existing[asset_cfg.name]
+        candidate = existing.get(asset_cfg.name)
+        if candidate is not None and self._asset_matches(candidate, asset_cfg):
+            return candidate
+
+        # The context is shared across gates, so two suites can legitimately use
+        # the same asset NAME for different data (e.g. a raw table and its
+        # batch-scoped query). Registering under a discriminated name keeps them
+        # distinct instead of silently validating whichever was created first.
+        name = asset_cfg.name
+        if candidate is not None:
+            definition = asset_cfg.query if asset_cfg.type == "query" else asset_cfg.table_name
+            name = f"{asset_cfg.name}__{abs(hash(definition)) % 10**8}"
+            if name in existing:
+                return existing[name]
+
         if asset_cfg.type == "query":
-            return source.add_query_asset(name=asset_cfg.name, query=asset_cfg.query)
-        kwargs: dict[str, Any] = {"name": asset_cfg.name, "table_name": asset_cfg.table_name}
+            return source.add_query_asset(name=name, query=asset_cfg.query)
+        kwargs: dict[str, Any] = {"name": name, "table_name": asset_cfg.table_name}
         if asset_cfg.schema_name:
             kwargs["schema_name"] = asset_cfg.schema_name
         return source.add_table_asset(**kwargs)
