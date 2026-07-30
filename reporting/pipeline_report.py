@@ -41,8 +41,23 @@ class WarnRow:
 
 
 def collect_warnings(result: "PipelineResult") -> list[WarnRow]:
-    """Flatten every failure across validation gates and custom checks."""
+    """Flatten every failure: operational errors, validation gates, and checks."""
     rows: list[WarnRow] = []
+
+    # Operational failures first — a stage that did not run outranks any
+    # expectation result, because the run did not do its job.
+    for error in getattr(result, "errors", []):
+        rows.append(
+            WarnRow(
+                gate=error.stage,
+                severity="critical",
+                dimension="operational",
+                target=result.pipeline,
+                subject=error.error_type,
+                observed=None,
+                detail=error.message,
+            )
+        )
 
     for outcome in result.validations:
         gate = str(outcome.meta.get("gate", "?"))
@@ -123,7 +138,14 @@ def write_run_manifest(result: "PipelineResult") -> Path:
     ctx.ensure_dirs()
     path = ctx.run_dir / "run_manifest.json"
     payload = result.to_dict()
-    payload["status"] = "passed" if result.passed else ("critical" if result.has_critical_failure else "warning")
+    if result.passed:
+        payload["status"] = "passed"
+    elif getattr(result, "errors", []):
+        payload["status"] = "error"
+    elif result.has_critical_failure:
+        payload["status"] = "critical"
+    else:
+        payload["status"] = "warning"
     path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return path
 
@@ -157,7 +179,14 @@ def _warnings_markdown(result: "PipelineResult") -> str:
     ctx = result.context
     warnings = collect_warnings(result)
     critical = [w for w in warnings if w.severity == "critical"]
-    status = "✅ PASSED" if result.passed else ("🔴 CRITICAL" if result.has_critical_failure else "🟡 WARNINGS")
+    if result.passed:
+        status = "✅ PASSED"
+    elif getattr(result, "errors", []):
+        status = "⛔ ERROR"
+    elif result.has_critical_failure:
+        status = "🔴 CRITICAL"
+    else:
+        status = "🟡 WARNINGS"
 
     lines: list[str] = [
         f"# Warnings Report — `{result.pipeline}`",
@@ -175,6 +204,18 @@ def _warnings_markdown(result: "PipelineResult") -> str:
     if not warnings:
         lines += ["No failures — all validation gates and checks passed. 🎉", ""]
         return "\n".join(lines) + "\n"
+
+    errors = getattr(result, "errors", [])
+    if errors:
+        lines += [
+            "## ⛔ Operational errors (the run did not complete normally)",
+            "",
+            "| Stage | Error | Message |",
+            "|:------|:------|:--------|",
+        ]
+        for error in errors:
+            lines.append(f"| `{error.stage}` | `{error.error_type}` | {error.message} |")
+        lines.append("")
 
     lines += [
         "## All failures",
@@ -211,9 +252,10 @@ def _warnings_markdown(result: "PipelineResult") -> str:
 
 def render_pipeline_console(result: "PipelineResult", console: Console | None = None) -> None:
     console = console or Console()
-    passed = result.passed
-    if passed:
+    if result.passed:
         color, status = "green", "PASSED"
+    elif getattr(result, "errors", []):
+        color, status = "red", "ERROR — run did not complete"
     elif result.has_critical_failure:
         color, status = "red", "CRITICAL FAILURE"
     else:
@@ -238,6 +280,9 @@ def render_pipeline_console(result: "PipelineResult", console: Console | None = 
     table.add_column("Suite / Check")
     table.add_column("Detail")
 
+    for error in getattr(result, "errors", []):
+        table.add_row(error.stage, "[red]⛔[/red]", error.error_type, error.message)
+
     for outcome in result.validations:
         mark = "[green]✓[/green]" if outcome.success else "[red]✗[/red]"
         table.add_row(
@@ -250,5 +295,5 @@ def render_pipeline_console(result: "PipelineResult", console: Console | None = 
         mark = "[green]✓[/green]" if check.success else ("[red]✗[/red]" if check.severity == "critical" else "[yellow]![/yellow]")
         table.add_row("check", mark, check.check, check.details)
 
-    if result.validations or result.checks:
+    if result.validations or result.checks or getattr(result, "errors", []):
         console.print(table)

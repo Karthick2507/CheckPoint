@@ -98,10 +98,16 @@ def run_pipeline(
 
     result = Pipeline(cfg, resolve_source=resolve, context=context).run()
 
-    render_pipeline_console(result, console=console)
-    paths = write_pipeline_reports(result)
-    console.print(f"[green]Manifest:[/green] {paths['manifest']}")
-    console.print(f"[green]Warnings report:[/green] {paths['warnings']}")
+    # Reports are the record of the run: write them even if rendering fails.
+    try:
+        render_pipeline_console(result, console=console)
+    finally:
+        paths = write_pipeline_reports(result)
+        console.print(f"[green]Manifest:[/green] {paths['manifest']}")
+        console.print(f"[green]Warnings report:[/green] {paths['warnings']}")
+
+    if result.errors:
+        console.print(f"[red]{len(result.errors)} operational error(s) — see the warnings report.[/red]")
 
     raise typer.Exit(code=_exit_code(result.has_critical_failure, result.passed, fail_on))
 
