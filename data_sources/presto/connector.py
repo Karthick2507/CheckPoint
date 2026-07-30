@@ -1,6 +1,6 @@
 """Presto / Trino connector.
 
-Reuses the exact connection machinery proven in ``bcv_analyzer.py``:
+Connection machinery:
 
 * SQLAlchemy URL ``trino://<user>@<host>:<port>/<catalog>/<schema>``,
 * host normalization via ``urlparse`` (accepts ``host:port`` or a full URL),

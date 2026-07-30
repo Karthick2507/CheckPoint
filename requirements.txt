@@ -1,13 +1,7 @@
-# Direct dependencies of BCV_Validation
-trino[sqlalchemy]
-typer
-questionary
-openpyxl
-
-# Direct dependencies of GE_Validation
-great_expectations
-pandas
-pyyaml
-rich
-
-
+# ETL + data-quality framework dependencies
+trino[sqlalchemy]     # Presto/Trino connector (SQLAlchemy dialect)
+typer                 # CLI
+great_expectations    # validation engine
+pandas                # GE / tabular support
+pyyaml                # config loading
+rich                  # console reporting

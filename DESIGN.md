@@ -47,7 +47,7 @@ etl_framework/
 │   ├── base.py            #   DataSource ABC + shared execute/describe
 │   ├── registry.py        #   @register + create_data_source factory
 │   ├── config.py          #   connection YAML loader (${ENV} interpolation)
-│   ├── presto/            #   Presto/Trino connector (bcv_analyzer Bearer auth)
+│   ├── presto/            #   Presto/Trino connector (Bearer-token auth)
 │   └── snowflake/         #   Snowflake connector (proves multi-source design)
 ├── core/
 │   ├── extract/           # read rows (table/query, incremental by batch_id)
@@ -145,7 +145,7 @@ etl_output/
 ```
 
 `run_id = <UTC timestamp>_<8 hex>`; `batch_id = (now − 24h)` rounded to the hour
-(matching the Presto batch partitioning already used by `bcv_analyzer`).
+(matching the Presto batch partitioning already used on the source tables).
 
 ## 8. Configuration model (two audiences)
 
