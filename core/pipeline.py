@@ -252,7 +252,12 @@ class Pipeline:
             critical=outcome.has_critical_failure,
         )
 
-    def _run_checks(self, source: DataSource, result: "PipelineResult") -> None:
+    def _run_checks(
+        self,
+        source: DataSource,
+        result: "PipelineResult",
+        template_context: dict[str, Any] | None = None,
+    ) -> None:
         default_target = self.config.source.table
         for spec in self.config.checks:
             # Each check is independent: one bad spec must not sink the rest.
@@ -260,7 +265,11 @@ class Pipeline:
                 check = build_check(spec, default_target)
                 if isinstance(check, VolumeDriftCheck):
                     res = check.run(
-                        source, state=self.state, run_id=self.context.run_id, batch_id=self.context.batch_id
+                        source,
+                        state=self.state,
+                        run_id=self.context.run_id,
+                        batch_id=self.context.batch_id,
+                        template_context=template_context,
                     )
                 else:
                     res = check.run(source, state=self.state)
@@ -331,7 +340,7 @@ class Pipeline:
         # independent of extract, so they still run if extract failed.
         if cfg.suite_raw:
             self._validate(source, cfg.suite_raw, "raw", result, template_context)
-        self._run_checks(source, result)
+        self._run_checks(source, result, template_context)
 
         # 3. Transform (ELT on the source)
         transform_ok = True

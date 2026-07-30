@@ -19,18 +19,10 @@ from dataclasses import replace
 from typing import Any
 
 from core.validate.suite_config import AssetConfig, SuiteConfig
-from runtime.templating import render_sql
+from runtime.sql import build_batch_predicate as _build_predicate
+from runtime.sql import sql_literal  # re-exported for callers
 
-
-def sql_literal(value: Any) -> str:
-    """Render a batch value as a SQL literal."""
-    if value is None:
-        return "NULL"
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if isinstance(value, (int, float)):
-        return str(value)
-    return "'" + str(value).replace("'", "''") + "'"
+__all__ = ["sql_literal", "build_batch_predicate", "scope_asset_to_batch", "scope_suite_to_batch"]
 
 
 def build_batch_predicate(
@@ -39,11 +31,7 @@ def build_batch_predicate(
     template_context: dict[str, Any] | None = None,
 ) -> str | None:
     """Return the WHERE predicate restricting ``asset`` to ``batch_id``."""
-    if asset.batch_filter:
-        return render_sql(asset.batch_filter, template_context or {})
-    if asset.batch_key:
-        return f"{asset.batch_key} = {sql_literal(batch_id)}"
-    return None
+    return _build_predicate(asset.batch_key, batch_id, asset.batch_filter, template_context)
 
 
 def scope_asset_to_batch(

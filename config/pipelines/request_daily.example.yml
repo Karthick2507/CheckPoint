@@ -71,8 +71,13 @@ pipeline:
       severity: critical
     - type: volume_drift
       target: mrm_log_flat.default.request
-      tolerance: 0.25
-      window: 5
+      # Count THIS batch, not the whole table. On an append-only table the
+      # total only grows, so an unscoped count can never see a failed batch
+      # (100k historical rows + 0 new rows still counts ~100k).
+      batch_key: process_batch_id
+      tolerance: 0.25          # allowed deviation from the median baseline
+      window: 5                # observations forming the baseline
+      min_history: 3           # judge nothing until this many exist
       severity: warning
     - type: schema_drift
       target: mrm_log_flat.default.request

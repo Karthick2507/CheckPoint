@@ -55,14 +55,9 @@ class LoadResult:
     atomic: bool = True
 
 
-def sql_literal(value: Any) -> str:
-    if value is None:
-        return "NULL"
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if isinstance(value, (int, float)):
-        return str(value)
-    return "'" + str(value).replace("'", "''") + "'"
+# Single shared implementation (also handles NaN/Inf, which the old local copy
+# emitted verbatim and broke the INSERT).
+from runtime.sql import sql_literal  # noqa: E402
 
 
 class Loader:
