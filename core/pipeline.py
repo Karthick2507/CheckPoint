@@ -263,16 +263,16 @@ class Pipeline:
             # Each check is independent: one bad spec must not sink the rest.
             try:
                 check = build_check(spec, default_target)
+                # Every check gets the run's batch so it can scope itself;
+                # volume-drift additionally records the observation.
+                kwargs: dict[str, Any] = {
+                    "state": self.state,
+                    "batch_id": self.context.batch_id,
+                    "template_context": template_context,
+                }
                 if isinstance(check, VolumeDriftCheck):
-                    res = check.run(
-                        source,
-                        state=self.state,
-                        run_id=self.context.run_id,
-                        batch_id=self.context.batch_id,
-                        template_context=template_context,
-                    )
-                else:
-                    res = check.run(source, state=self.state)
+                    kwargs["run_id"] = self.context.run_id
+                res = check.run(source, **kwargs)
             except Exception as exc:
                 self._fail(result, f"check:{spec.get('type', '?')}", exc)
                 continue

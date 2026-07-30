@@ -22,7 +22,7 @@ from typing import Any
 
 from quality.base import QualityCheck
 from quality.stats import mad, median_value, relative_deviation, robust_z_score
-from runtime.sql import build_batch_predicate, where_clause
+from runtime.sql import where_clause
 
 
 class VolumeDriftCheck(QualityCheck):
@@ -39,23 +39,21 @@ class VolumeDriftCheck(QualityCheck):
         batch_filter: str | None = None,
         severity: str = "warning",
     ) -> None:
-        super().__init__(target, severity)
+        super().__init__(target, severity, batch_key=batch_key, batch_filter=batch_filter)
         self.tolerance = float(tolerance)
         self.window = int(window)
         self.min_history = max(1, int(min_history))
-        self.batch_key = batch_key
-        self.batch_filter = batch_filter
 
     # -- SQL ---------------------------------------------------------------
 
     def count_sql(self, batch_id: Any = None, template_context: dict[str, Any] | None = None) -> str:
-        predicate = build_batch_predicate(self.batch_key, batch_id, self.batch_filter, template_context)
+        predicate = self.batch_predicate(batch_id, template_context)
         return f"SELECT COUNT(*) AS n FROM {self.target}{where_clause(predicate)}"
 
     @property
     def scope_key(self) -> str:
         """History is kept per scope so batch counts never mix with table counts."""
-        return f"{self.target}#batch" if (self.batch_key or self.batch_filter) else self.target
+        return f"{self.target}#batch" if self.is_batch_scoped else self.target
 
     # -- execution ---------------------------------------------------------
 
