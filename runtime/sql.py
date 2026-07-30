@@ -9,7 +9,7 @@ load, and validation layers.
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Iterable
 
 
 def sql_literal(value: Any) -> str:
@@ -29,6 +29,36 @@ def sql_literal(value: Any) -> str:
     if isinstance(value, int):
         return str(value)
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def quote_identifier(name: str, quote: str = '"') -> str:
+    """Quote a single SQL identifier.
+
+    Without this, a column called ``order`` or ``select`` is a syntax error.
+    Dotted names are quoted part-by-part (``a.b`` -> ``"a"."b"``) so a qualified
+    table stays qualified rather than becoming one absurd identifier. Anything
+    already quoted, or containing the quote character itself, is left alone —
+    over-quoting hand-written SQL would break more than it fixes.
+    """
+    if not name:
+        return name
+    name = str(name)
+    if quote in name:
+        return name  # already quoted, or an expression we must not mangle
+    return ".".join(f"{quote}{part}{quote}" for part in name.split("."))
+
+
+def quote_identifiers(names: Iterable[str], quote: str = '"') -> list[str]:
+    """Quote each identifier in ``names``."""
+    return [quote_identifier(name, quote) for name in names]
+
+
+def identifier_quote_for(source: Any) -> str:
+    """The quote character a data source's dialect uses."""
+    try:
+        return source.capabilities().identifier_quote or '"'
+    except Exception:  # pragma: no cover - defensive
+        return '"'
 
 
 def build_batch_predicate(

@@ -57,7 +57,12 @@ class LoadResult:
 
 # Single shared implementation (also handles NaN/Inf, which the old local copy
 # emitted verbatim and broke the INSERT).
-from runtime.sql import sql_literal  # noqa: E402
+from runtime.sql import (  # noqa: E402
+    identifier_quote_for,
+    quote_identifier,
+    quote_identifiers,
+    sql_literal,
+)
 
 
 class Loader:
@@ -93,16 +98,18 @@ class Loader:
             raise ValueError("merge load mode requires 'keys'")
 
         atomic = bool(target.capabilities().supports_transactions)
+        quote = identifier_quote_for(target)
+        quoted_table = quote_identifier(table, quote)
 
         # Delete and insert must land together: a failure between them would
         # otherwise delete rows and never put them back.
         with target.transaction() as tx:
             deleted = 0
             if mode == "overwrite":
-                tx.execute(f"DELETE FROM {table}")
+                tx.execute(f"DELETE FROM {quoted_table}")
             elif mode == "merge":
-                deleted = self._delete_matching(tx, table, rows, keys)
-            inserted = self._insert(tx, table, rows)
+                deleted = self._delete_matching(tx, quoted_table, rows, keys, quote)
+            inserted = self._insert(tx, quoted_table, rows, quote)
 
         return LoadResult(
             target=table,
@@ -139,12 +146,14 @@ class Loader:
             )
 
         atomic = bool(target.capabilities().supports_transactions)
+        quote = identifier_quote_for(target)
+        quoted_table = quote_identifier(table, quote)
         inserted = 0
         with target.transaction() as tx:
             for chunk in chunks:
                 if not chunk:
                     continue
-                inserted += self._insert(tx, table, chunk)
+                inserted += self._insert(tx, quoted_table, chunk, quote)
 
         return LoadResult(
             target=table,
@@ -162,6 +171,7 @@ class Loader:
         table: str,
         rows: Sequence[dict[str, Any]],
         keys: Sequence[str] | None,
+        quote: str = '"',
     ) -> int:
         if not rows or not keys:
             return 0
@@ -169,18 +179,26 @@ class Loader:
         for batch in _chunks(rows, _INSERT_BATCH):
             conditions = []
             for row in batch:
-                clause = " AND ".join(f"{key} = {sql_literal(row.get(key))}" for key in keys)
+                clause = " AND ".join(
+                    f"{quote_identifier(key, quote)} = {sql_literal(row.get(key))}" for key in keys
+                )
                 conditions.append(f"({clause})")
             where = " OR ".join(conditions)
             tx.execute(f"DELETE FROM {table} WHERE {where}")
             deleted += len(batch)  # keys targeted for replacement
         return deleted
 
-    def _insert(self, tx: Any, table: str, rows: Sequence[dict[str, Any]]) -> int:
+    def _insert(
+        self,
+        tx: Any,
+        table: str,
+        rows: Sequence[dict[str, Any]],
+        quote: str = '"',
+    ) -> int:
         if not rows:
             return 0
         columns = list(rows[0].keys())
-        col_list = ", ".join(columns)
+        col_list = ", ".join(quote_identifiers(columns, quote))
         inserted = 0
         for batch in _chunks(rows, _INSERT_BATCH):
             values_sql = ", ".join(
