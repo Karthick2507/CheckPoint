@@ -68,8 +68,8 @@ class DataSource(ABC):
     def execute(self, sql: str) -> list[dict[str, Any]]:
         """Run ``sql`` and return rows as a list of dicts.
 
-        Uses a raw DBAPI cursor (like ``bcv_analyzer.execute_sql``) so it works
-        uniformly across dialects. Statements with no result set return ``[]``.
+        Uses a raw DBAPI cursor so it works uniformly across dialects.
+        Statements with no result set return ``[]``.
         """
         engine = self.get_engine()
         connection = engine.raw_connection()

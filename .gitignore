@@ -11,9 +11,6 @@ ge_output/
 gx/
 uncommitted/
 
-# BCV analyzer generated output
-output/
-
 # OS / editor
 .DS_Store
 .idea/

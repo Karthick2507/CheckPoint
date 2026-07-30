@@ -11,9 +11,9 @@ Every pipeline execution gets a :class:`RunContext` that fixes a ``run_id`` and
         ├── quarantine/
         └── logs/
 
-The ``batch_id`` follows the existing bcv_analyzer convention (current time
-minus 24h, rounded to the hour) so the ETL framework aligns with the batch
-partitioning already used on the Presto tables.
+The ``batch_id`` follows the Presto batch convention (current time minus 24h,
+rounded to the hour) so the ETL framework aligns with the batch partitioning
+already used on the source tables.
 """
 
 from __future__ import annotations

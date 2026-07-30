@@ -1,7 +1,7 @@
 """Render :class:`ValidationOutcome` objects to the console and to files.
 
 * :func:`render_console` prints a color-coded summary (green pass / red fail)
-  in the same ``rich`` style the BCV analyzer uses.
+  using ``rich``.
 * :func:`write_json_report` / :func:`write_markdown_report` persist the run so
   results can be diffed, attached to tickets, or checked into CI artifacts.
 """
