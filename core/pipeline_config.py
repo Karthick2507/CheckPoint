@@ -57,6 +57,8 @@ class PipelineConfig:
     suite_post: str | None = None
     checks: list[dict[str, Any]] = field(default_factory=list)
     schedule: str | None = None
+    # User-defined variables exposed to SQL templates alongside batch_id/run_id.
+    vars: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PipelineConfig":
@@ -109,6 +111,7 @@ class PipelineConfig:
             suite_post=validate.get("post"),
             checks=list(pipeline.get("checks") or []),
             schedule=pipeline.get("schedule"),
+            vars=dict(pipeline.get("vars") or {}),
         )
 
 

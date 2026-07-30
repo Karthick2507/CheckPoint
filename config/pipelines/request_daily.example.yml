@@ -13,6 +13,13 @@ pipeline:
   name: request_daily
   env: prod
 
+  # Variables available to every SQL template below, alongside the built-ins
+  # {{ batch_id }}, {{ run_id }}, {{ pipeline }} and {{ env }}.
+  # Rendering is strict: an unknown {{ name }} fails the stage rather than
+  # silently rendering empty and scanning/returning the wrong rows.
+  vars:
+    min_duration: 0
+
   source:
     connection: mrm_presto
     table: mrm_log_flat.default.request

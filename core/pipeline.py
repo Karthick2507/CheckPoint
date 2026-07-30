@@ -36,6 +36,7 @@ from data_sources.base import DataSource
 from quality import CHECK_TYPES, CheckResult, QualityCheck, VolumeDriftCheck
 from runtime.run_context import RunContext
 from runtime.state import FileState
+from runtime.templating import render_all, render_sql
 
 
 def build_check(spec: dict[str, Any], default_target: str | None) -> QualityCheck:
@@ -157,9 +158,20 @@ class Pipeline:
 
     # -- gate helpers ----------------------------------------------------
 
-    def _validate(self, source: DataSource, suite_path: str, gate: str, result: "PipelineResult") -> None:
+    def _validate(
+        self,
+        source: DataSource,
+        suite_path: str,
+        gate: str,
+        result: "PipelineResult",
+        template_context: dict[str, Any] | None = None,
+    ) -> None:
         try:
             suite = self.suite_loader(suite_path)
+            # A query asset may be templated on the run's batch, same as
+            # transform SQL, so a gate can validate just this batch.
+            if template_context and suite.asset.query:
+                suite.asset.query = render_sql(suite.asset.query, template_context)
             outcome = GEValidationFramework(source).run(suite)
         except Exception as exc:
             self._fail(result, f"validate:{gate}", exc)
@@ -215,6 +227,9 @@ class Pipeline:
             self._record_complete(result)
             return result
 
+        # SQL in the config may reference {{ batch_id }}, {{ run_id }}, vars, ...
+        template_context = self.context.template_context(cfg.vars)
+
         # 1. Extract
         payload: list[dict[str, Any]] = []
         extract_ok = False
@@ -222,7 +237,7 @@ class Pipeline:
             extract = self.extractor.extract(
                 source,
                 table=cfg.source.table,
-                query=cfg.source.query,
+                query=render_sql(cfg.source.query, template_context) if cfg.source.query else None,
                 batch_key=cfg.source.batch_key,
                 batch_id=self.context.batch_id,
                 incremental=cfg.extract.incremental,
@@ -238,13 +253,13 @@ class Pipeline:
         # 2. Gate: raw (suite + custom checks on the source). These are
         # independent of extract, so they still run if extract failed.
         if cfg.suite_raw:
-            self._validate(source, cfg.suite_raw, "raw", result)
+            self._validate(source, cfg.suite_raw, "raw", result, template_context)
         self._run_checks(source, result)
 
         # 3. Transform (ELT on the source)
         transform_ok = True
         try:
-            transform = self.transformer.apply(source, cfg.transform)
+            transform = self.transformer.apply(source, render_all(cfg.transform, template_context))
             if transform.applied:
                 payload = transform.rows
                 result.transform_rows = transform.row_count
@@ -255,7 +270,7 @@ class Pipeline:
 
         # 4. Gate: curated
         if cfg.suite_curated:
-            self._validate(source, cfg.suite_curated, "curated", result)
+            self._validate(source, cfg.suite_curated, "curated", result, template_context)
 
         # 5. Load — only with a trustworthy payload. Loading after a failed
         # extract or transform would write a partial or stale result set.
@@ -290,7 +305,7 @@ class Pipeline:
 
             # 6. Gate: post-load — only meaningful if the load itself ran.
             if cfg.suite_post and target is not None and result.load is not None:
-                self._validate(target, cfg.suite_post, "post", result)
+                self._validate(target, cfg.suite_post, "post", result, template_context)
 
         self._record_complete(result)
         return result

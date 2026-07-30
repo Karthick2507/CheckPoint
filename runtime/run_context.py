@@ -93,6 +93,20 @@ class RunContext:
             }
         )
 
+    # -- templating -------------------------------------------------------
+
+    def template_context(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Variables available to SQL templates (see ``runtime.templating``)."""
+        context: dict[str, Any] = {
+            "batch_id": self.batch_id,
+            "run_id": self.run_id,
+            "pipeline": self.pipeline,
+            "env": self.env,
+        }
+        if extra:
+            context.update(extra)
+        return context
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,

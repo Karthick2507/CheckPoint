@@ -4,4 +4,5 @@ typer                 # CLI
 great_expectations    # validation engine
 pandas                # GE / tabular support
 pyyaml                # config loading
+jinja2                # SQL templating ({{ batch_id }} in pipeline configs)
 rich                  # console reporting
