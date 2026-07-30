@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_OUTPUT_ROOT = Path("etl_output")
+# Deliberately OUTSIDE the run-output tree: that tree is gitignored and
+# recreated per run, so baselines kept there never survive to be compared.
+DEFAULT_STATE_DIR = Path("state")
 
 
 def default_batch_id(now: datetime | None = None) -> str:
@@ -47,6 +50,9 @@ class RunContext:
     batch_id: str = ""
     started_at: str = ""
     output_root: Path = DEFAULT_OUTPUT_ROOT
+    # Baselines for the stateful checks must OUTLIVE the run, so they live in
+    # their own root rather than under the (gitignored, per-run) output tree.
+    state_root: Path | None = None
     lineage: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -58,6 +64,7 @@ class RunContext:
         if not self.started_at:
             self.started_at = now.isoformat(timespec="seconds")
         self.output_root = Path(self.output_root)
+        self.state_root = Path(self.state_root) if self.state_root else DEFAULT_STATE_DIR
 
     # -- output layout ---------------------------------------------------
 
@@ -67,7 +74,8 @@ class RunContext:
 
     @property
     def state_dir(self) -> Path:
-        return self.output_root / "state"
+        """Where cross-run baselines live (persistent, not per-run output)."""
+        return Path(self.state_root)
 
     def subdir(self, name: str) -> Path:
         """Return (creating) a subdirectory of this run's output dir."""

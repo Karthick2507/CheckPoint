@@ -5,11 +5,17 @@ __pycache__/
 .venv/
 venv/
 
-# ETL framework generated output
+# ETL framework generated output (per-run, disposable)
 etl_output/
 ge_output/
 gx/
 uncommitted/
+
+# NOTE: state/ is deliberately NOT ignored. It holds the schema and row-count
+# baselines that schema-drift and volume-drift compare against, so it must
+# survive between runs. Commit it, or point --state-dir at a durable volume.
+state/*.lock
+state/**/*.tmp
 
 # OS / editor
 .DS_Store

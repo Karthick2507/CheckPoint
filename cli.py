@@ -75,6 +75,16 @@ def run_pipeline(
     pipeline: Annotated[Path, typer.Option(help="Path to the pipeline YAML config.")],
     connections_dir: Annotated[Path, typer.Option(help="Directory of connection configs.")] = DEFAULT_CONNECTIONS_DIR,
     output_dir: Annotated[Path, typer.Option(help="Root for run output (etl_output).")] = Path("etl_output"),
+    state_dir: Annotated[
+        Path,
+        typer.Option(
+            help=(
+                "Persistent root for drift baselines. MUST survive between runs — "
+                "point it at a durable volume in CI/cron, or schema-drift and "
+                "volume-drift can never detect anything."
+            )
+        ),
+    ] = Path("state"),
     env: Annotated[Optional[str], typer.Option(help="Override the pipeline env.")] = None,
     fail_on: Annotated[str, typer.Option(help="Exit non-zero on: critical | any | never.")] = "critical",
 ) -> None:
@@ -93,7 +103,7 @@ def run_pipeline(
             )
         return create_data_source(connections[name])
 
-    context = RunContext(pipeline=cfg.name, env=cfg.env, output_root=output_dir)
+    context = RunContext(pipeline=cfg.name, env=cfg.env, output_root=output_dir, state_root=state_dir)
     console.print(f"[bold]Running pipeline[/bold] [cyan]{cfg.name}[/cyan]  (run {context.run_id})")
 
     result = Pipeline(cfg, resolve_source=resolve, context=context).run()
