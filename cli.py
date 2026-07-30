@@ -115,6 +115,11 @@ def run_pipeline(
         paths = write_pipeline_reports(result)
         console.print(f"[green]Manifest:[/green] {paths['manifest']}")
         console.print(f"[green]Warnings report:[/green] {paths['warnings']}")
+        if paths.get("quarantine"):
+            console.print(
+                f"[yellow]Quarantined rows:[/yellow] {len(paths['quarantine'])} file(s) in "
+                f"{result.context.run_dir / 'quarantine'}"
+            )
 
     if result.errors:
         console.print(f"[red]{len(result.errors)} operational error(s) — see the warnings report.[/red]")

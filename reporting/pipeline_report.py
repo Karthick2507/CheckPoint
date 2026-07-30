@@ -24,6 +24,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from core.validate.reporting import write_reports
+from reporting.quarantine import write_run_quarantine
 
 if TYPE_CHECKING:  # avoid a runtime import cycle
     from core.pipeline import PipelineResult
@@ -168,11 +169,17 @@ def write_validation_reports(result: "PipelineResult") -> list[Path]:
 
 
 def write_pipeline_reports(result: "PipelineResult") -> dict[str, Any]:
-    """Write manifest + warnings + per-suite validation reports for a run."""
+    """Write manifest, warnings, validation reports and quarantine for a run."""
     manifest = write_run_manifest(result)
     warnings = write_warnings_report(result)
     validations = write_validation_reports(result)
-    return {"manifest": manifest, "warnings": warnings, "validations": validations}
+    quarantine = write_run_quarantine(result)
+    return {
+        "manifest": manifest,
+        "warnings": warnings,
+        "validations": validations,
+        "quarantine": quarantine,
+    }
 
 
 def _warnings_markdown(result: "PipelineResult") -> str:

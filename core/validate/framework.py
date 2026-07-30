@@ -53,6 +53,9 @@ class ExpectationResultRow:
     exception_message: str | None = None
     severity: str = "warning"
     expectation_id: str | None = None
+    # Full GE result payload, kept so the quarantine writer can recover the
+    # offending values without re-querying the warehouse. Not serialized.
+    result_detail: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -132,6 +135,7 @@ class ValidationOutcome:
                     observed_value=result_detail.get("observed_value"),
                     unexpected_count=result_detail.get("unexpected_count"),
                     unexpected_percent=result_detail.get("unexpected_percent"),
+                    result_detail=result_detail,
                     exception_message=(exc_info.get("exception_message") if isinstance(exc_info, dict) else None),
                 )
             )

@@ -9,6 +9,7 @@ from reporting.pipeline_report import (
     write_validation_reports,
     write_warnings_report,
 )
+from reporting.quarantine import quarantine_rows, write_quarantine, write_run_quarantine
 
 __all__ = [
     "WarnRow",
@@ -18,4 +19,7 @@ __all__ = [
     "write_run_manifest",
     "write_validation_reports",
     "write_warnings_report",
+    "quarantine_rows",
+    "write_quarantine",
+    "write_run_quarantine",
 ]
