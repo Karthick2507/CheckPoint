@@ -27,6 +27,10 @@ class SourceSpec:
 class ExtractSpec:
     mode: str = "full"  # full | incremental
     limit: int | None = None
+    # Stream rows in chunks instead of materializing the whole result set.
+    # Applies to the row-based (cross-system) path only.
+    stream: bool = False
+    chunk_size: int = 10_000
 
     @property
     def incremental(self) -> bool:
@@ -93,6 +97,8 @@ class PipelineConfig:
         extract = ExtractSpec(
             mode=str(extract_data.get("mode") or "full"),
             limit=extract_data.get("limit"),
+            stream=bool(extract_data.get("stream") or False),
+            chunk_size=int(extract_data.get("chunk_size") or 10_000),
         )
 
         transform = list(pipeline.get("transform") or [])

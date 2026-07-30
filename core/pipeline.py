@@ -170,6 +170,26 @@ class Pipeline:
         )
         return "pushdown" if same_warehouse else "rows"
 
+    def can_stream(self) -> tuple[bool, str]:
+        """Whether the row-based path can stream, and why not if it can't.
+
+        Streaming holds no full result set, so it cannot feed a transform (which
+        needs a materialized set) and cannot serve a destructive load (which
+        would delete before knowing whether the stream yields anything — the
+        empty-payload hazard from P0-1).
+        """
+        cfg = self.config
+        if not cfg.extract.stream:
+            return False, "not enabled"
+        if cfg.transform:
+            return False, "a transform needs a materialized result set"
+        target = cfg.target
+        if not (target and target.connection and target.table and target.mode != "none"):
+            return False, "streaming needs a load target"
+        if target.mode != "append":
+            return False, f"streaming supports only append loads (target mode is {target.mode!r})"
+        return True, ""
+
     def _source_sql(self, cfg: PipelineConfig, template_context: dict[str, Any]) -> str:
         """The SELECT that defines the source data set."""
         if cfg.source.query:
@@ -284,16 +304,26 @@ class Pipeline:
         # warehouse and the SELECT is embedded into the load statement.
         payload: list[dict[str, Any]] = []
         extract_ok = True
+        streaming = False
         if execution == "rows":
-            extract_ok = False
-            try:
-                extract = self.extractor.extract(source, query=source_sql)
-                result.extract_rows = extract.row_count
-                payload = extract.rows
-                extract_ok = True
-                self.context.record("extract", rows=extract.row_count, sql=extract.sql)
-            except Exception as exc:
-                self._fail(result, "extract", exc)
+            streaming, why_not = self.can_stream()
+            if streaming:
+                # Extract and load are fused: chunks go straight to the target
+                # so memory stays bounded by chunk_size, not by table size.
+                result.execution = "stream"
+                self.context.record("extract:stream", sql=source_sql, chunk_size=cfg.extract.chunk_size)
+            else:
+                if cfg.extract.stream:
+                    self.context.record("extract:stream_unavailable", reason=why_not)
+                extract_ok = False
+                try:
+                    extract = self.extractor.extract(source, query=source_sql)
+                    result.extract_rows = extract.row_count
+                    payload = extract.rows
+                    extract_ok = True
+                    self.context.record("extract", rows=extract.row_count, sql=extract.sql)
+                except Exception as exc:
+                    self._fail(result, "extract", exc)
         else:
             self.context.record("extract:pushdown", sql=source_sql, materialized=False)
 
@@ -340,7 +370,15 @@ class Pipeline:
             target = None
             try:
                 target = self.resolve_source(cfg.target.connection)
-                if execution == "pushdown":
+                if streaming:
+                    _, chunks = self.extractor.stream(
+                        source, query=source_sql, chunk_size=cfg.extract.chunk_size
+                    )
+                    load_result = self.loader.load_stream(
+                        target, cfg.target.table, chunks, mode=cfg.target.mode
+                    )
+                    result.extract_rows = load_result.inserted
+                elif execution == "pushdown":
                     load_result = self.pushdown_loader.load(
                         source,  # same warehouse hosts both sides
                         cfg.target.table,

@@ -13,9 +13,11 @@ and is what the tests exercise.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator
 
 from data_sources.base import DataSource
+
+DEFAULT_CHUNK_SIZE = 10_000
 
 
 @dataclass
@@ -73,3 +75,27 @@ class Extractor:
             raise ValueError("extract requires either 'table' or 'query'")
         rows = source.execute(sql)
         return ExtractResult(rows=rows, sql=sql, row_count=len(rows))
+
+    def stream(
+        self,
+        source: DataSource,
+        table: str | None = None,
+        query: str | None = None,
+        batch_key: str | None = None,
+        batch_id: str | None = None,
+        incremental: bool = False,
+        limit: int | None = None,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+    ) -> tuple[str, Iterator[list[dict[str, Any]]]]:
+        """Return the SQL and a generator yielding row chunks.
+
+        Memory stays bounded by ``chunk_size`` rather than by the result set,
+        which is what makes a large cross-system move survivable.
+        """
+        if query:
+            sql = query
+        elif table:
+            sql = self.build_table_sql(table, batch_key, batch_id, incremental, limit)
+        else:
+            raise ValueError("extract requires either 'table' or 'query'")
+        return sql, source.stream(sql, chunk_size=chunk_size)

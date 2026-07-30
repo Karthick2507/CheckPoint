@@ -121,6 +121,41 @@ class DataSource(ABC):
             except Exception as exc:  # pragma: no cover - defensive cleanup
                 print(f"Warning: failed to close connection cleanly: {exc}", file=sys.stderr)
 
+    def stream(self, sql: str, chunk_size: int = 10_000) -> Iterator[list[dict[str, Any]]]:
+        """Yield result rows in chunks instead of materializing them all.
+
+        ``execute`` calls ``fetchall``, so memory grows with the result set —
+        fine for a DESCRIBE, fatal for a large extract. This uses ``fetchmany``
+        so a cross-system move stays bounded regardless of table size.
+
+        The connection stays open for the life of the generator; callers should
+        consume it promptly (``close()`` the generator to release early).
+        """
+        engine = self.get_engine()
+        connection = engine.raw_connection()
+        cursor = None
+        try:
+            cursor = connection.cursor()
+            cursor.execute(sql)
+            if cursor.description is None:
+                return
+            columns = [column[0] for column in cursor.description]
+            while True:
+                rows = cursor.fetchmany(chunk_size)
+                if not rows:
+                    break
+                yield [dict(zip(columns, row)) for row in rows]
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception as exc:  # pragma: no cover - defensive cleanup
+                    print(f"Warning: failed to close cursor cleanly: {exc}", file=sys.stderr)
+            try:
+                connection.close()
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                print(f"Warning: failed to close connection cleanly: {exc}", file=sys.stderr)
+
     @contextmanager
     def transaction(self) -> Iterator[Transaction]:
         """Run several statements atomically on one connection.

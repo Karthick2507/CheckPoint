@@ -32,7 +32,7 @@ is what the tests exercise.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 from data_sources.base import DataSource
 
@@ -120,6 +120,43 @@ class Loader:
                 if atomic
                 else f"target does not support transactions; '{mode}' load was not atomic"
             ),
+        )
+
+    def load_stream(
+        self,
+        target: DataSource,
+        table: str,
+        chunks: Iterable[Sequence[dict[str, Any]]],
+        mode: str = "append",
+    ) -> LoadResult:
+        """Append row chunks as they arrive, never holding the full set.
+
+        Pairs with :meth:`Extractor.stream` for cross-system moves that are too
+        large to materialize. Only ``append`` is supported: a destructive mode
+        would have to delete before knowing whether the stream yields anything,
+        which is exactly the empty-payload hazard P0-1 guards against.
+        """
+        mode = (mode or "append").lower()
+        if mode != "append":
+            raise ValueError(
+                f"streaming load supports only 'append' (got {mode!r}); "
+                "use the pushdown loader for large destructive loads"
+            )
+
+        atomic = bool(target.capabilities().supports_transactions)
+        inserted = 0
+        with target.transaction() as tx:
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                inserted += self._insert(tx, table, chunk)
+
+        return LoadResult(
+            target=table,
+            mode=mode,
+            inserted=inserted,
+            atomic=atomic,
+            reason="" if atomic else "target does not support transactions; streamed load was not atomic",
         )
 
     # -- internals (operate on a Transaction, not the DataSource) ---------
