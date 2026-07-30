@@ -11,6 +11,12 @@ suite:
     type: table
     name: request
     table_name: mrm_log_flat.default.request
+    # Narrow the gate to the run's batch. Without this every expectation
+    # scans all history: a bad batch is diluted into billions of good rows,
+    # uniqueness fails forever on historical duplicates, and each run
+    # full-scans a TiB table. Use `batch_filter:` for anything a single
+    # equality cannot express (it is templated, e.g. "{{ batch_id }}").
+    batch_key: process_batch_id
 
 expectations:
   - id: pk_exists

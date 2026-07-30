@@ -5,6 +5,8 @@ suite:
     type: table
     name: request_clean
     table_name: ANALYTICS.PUBLIC.REQUEST_CLEAN
+    # Validate the rows this run just loaded, not the whole target table.
+    batch_key: process_batch_id
 
 expectations:
   - type: expect_table_row_count_to_be_between

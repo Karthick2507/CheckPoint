@@ -17,7 +17,17 @@ from data_sources.config import load_yaml
 
 @dataclass
 class AssetConfig:
-    """The data to validate: a ``table`` asset or a ``query`` asset."""
+    """The data to validate: a ``table`` asset or a ``query`` asset.
+
+    **Batch scoping.** Validating a whole table is both wrong and expensive for
+    an incremental pipeline: a bad batch is diluted into all of history, and
+    uniqueness checks fail forever on historical duplicates. Set ``batch_key``
+    (usually the partition column) and the asset is narrowed to the run's batch
+    — the gate then validates exactly the slice the pipeline just processed.
+
+    ``batch_filter`` gives full control for anything a single equality cannot
+    express; it is rendered with the same template variables as pipeline SQL.
+    """
 
     name: str
     type: str = "table"  # "table" | "query"
@@ -25,6 +35,12 @@ class AssetConfig:
     schema_name: str | None = None
     query: str | None = None
     batch: str = "whole_table"
+    batch_key: str | None = None
+    batch_filter: str | None = None
+
+    @property
+    def is_batch_scoped(self) -> bool:
+        return bool(self.batch_key or self.batch_filter)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AssetConfig":
@@ -48,6 +64,8 @@ class AssetConfig:
             schema_name=data.get("schema_name"),
             query=data.get("query"),
             batch=str(data.get("batch") or "whole_table"),
+            batch_key=data.get("batch_key"),
+            batch_filter=data.get("batch_filter"),
         )
 
 

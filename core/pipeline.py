@@ -31,6 +31,7 @@ from core.load import Loader, LoadResult, PushdownLoader, PushdownResult
 from core.pipeline_config import PipelineConfig
 from core.transform import Transformer
 from core.validate import GEValidationFramework, ValidationOutcome, load_suite_config
+from core.validate.scoping import scope_suite_to_batch
 from core.validate.suite_config import SuiteConfig
 from data_sources.base import DataSource
 from quality import CHECK_TYPES, CheckResult, QualityCheck, VolumeDriftCheck
@@ -210,7 +211,13 @@ class Pipeline:
             # transform SQL, so a gate can validate just this batch.
             if template_context and suite.asset.query:
                 suite.asset.query = render_sql(suite.asset.query, template_context)
-            outcome = GEValidationFramework(source).run(suite)
+            # Narrow the asset to the current batch when the suite asks for it,
+            # so the gate validates this run's slice rather than all history.
+            scoped = scope_suite_to_batch(suite, self.context.batch_id, template_context)
+            outcome = GEValidationFramework(source).run(scoped)
+            if scoped is not suite:
+                outcome.meta["batch_scoped"] = True
+                outcome.meta["batch_id"] = self.context.batch_id
         except Exception as exc:
             self._fail(result, f"validate:{gate}", exc)
             return
