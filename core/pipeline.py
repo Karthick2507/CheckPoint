@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from core.extract import Extractor
-from core.load import Loader, LoadResult
+from core.load import Loader, LoadResult, PushdownLoader, PushdownResult
 from core.pipeline_config import PipelineConfig
 from core.transform import Transformer
 from core.validate import GEValidationFramework, ValidationOutcome, load_suite_config
@@ -81,7 +81,8 @@ class PipelineResult:
     errors: list[StageError] = field(default_factory=list)
     extract_rows: int = 0
     transform_rows: int | None = None
-    load: LoadResult | None = None
+    load: LoadResult | PushdownResult | None = None
+    execution: str = "rows"
 
     @property
     def passed(self) -> bool:
@@ -113,6 +114,7 @@ class PipelineResult:
             "passed": self.passed,
             "has_critical_failure": self.has_critical_failure,
             "failure_count": self.failure_count,
+            "execution": self.execution,
             "extract_rows": self.extract_rows,
             "transform_rows": self.transform_rows,
             "load": None if self.load is None else dict(self.load.__dict__),
@@ -142,6 +144,42 @@ class Pipeline:
         self.extractor = Extractor()
         self.transformer = Transformer()
         self.loader = Loader()
+        self.pushdown_loader = PushdownLoader()
+
+    # -- execution strategy ------------------------------------------------
+
+    def execution_mode(self) -> str:
+        """Resolve the configured execution mode to ``rows`` or ``pushdown``.
+
+        ``auto`` chooses pushdown when the target lives on the *same* connection
+        as the source — the warehouse can then run ``INSERT … SELECT`` and no
+        rows travel through Python. Cross-system moves fall back to rows.
+        """
+        cfg = self.config
+        configured = (cfg.execution or "auto").lower()
+        if configured == "pushdown":
+            return "pushdown"
+        if configured == "rows":
+            return "rows"
+        same_warehouse = bool(
+            cfg.target
+            and cfg.target.connection
+            and cfg.target.connection == cfg.source.connection
+            and cfg.target.mode != "none"
+        )
+        return "pushdown" if same_warehouse else "rows"
+
+    def _source_sql(self, cfg: PipelineConfig, template_context: dict[str, Any]) -> str:
+        """The SELECT that defines the source data set."""
+        if cfg.source.query:
+            return render_sql(cfg.source.query, template_context)
+        return self.extractor.build_table_sql(
+            cfg.source.table or "",
+            batch_key=cfg.source.batch_key,
+            batch_id=self.context.batch_id,
+            incremental=cfg.extract.incremental,
+            limit=cfg.extract.limit,
+        )
 
     # -- failure capture --------------------------------------------------
 
@@ -229,26 +267,28 @@ class Pipeline:
 
         # SQL in the config may reference {{ batch_id }}, {{ run_id }}, vars, ...
         template_context = self.context.template_context(cfg.vars)
+        execution = self.execution_mode()
+        result.execution = execution
+        self.context.record("execution", mode=execution)
 
-        # 1. Extract
+        source_sql = self._source_sql(cfg, template_context)
+
+        # 1. Extract. Pushdown never materializes rows — the data stays in the
+        # warehouse and the SELECT is embedded into the load statement.
         payload: list[dict[str, Any]] = []
-        extract_ok = False
-        try:
-            extract = self.extractor.extract(
-                source,
-                table=cfg.source.table,
-                query=render_sql(cfg.source.query, template_context) if cfg.source.query else None,
-                batch_key=cfg.source.batch_key,
-                batch_id=self.context.batch_id,
-                incremental=cfg.extract.incremental,
-                limit=cfg.extract.limit,
-            )
-            result.extract_rows = extract.row_count
-            payload = extract.rows
-            extract_ok = True
-            self.context.record("extract", rows=extract.row_count, sql=extract.sql)
-        except Exception as exc:
-            self._fail(result, "extract", exc)
+        extract_ok = True
+        if execution == "rows":
+            extract_ok = False
+            try:
+                extract = self.extractor.extract(source, query=source_sql)
+                result.extract_rows = extract.row_count
+                payload = extract.rows
+                extract_ok = True
+                self.context.record("extract", rows=extract.row_count, sql=extract.sql)
+            except Exception as exc:
+                self._fail(result, "extract", exc)
+        else:
+            self.context.record("extract:pushdown", sql=source_sql, materialized=False)
 
         # 2. Gate: raw (suite + custom checks on the source). These are
         # independent of extract, so they still run if extract failed.
@@ -258,12 +298,22 @@ class Pipeline:
 
         # 3. Transform (ELT on the source)
         transform_ok = True
+        select_sql = source_sql
         try:
-            transform = self.transformer.apply(source, render_all(cfg.transform, template_context))
-            if transform.applied:
-                payload = transform.rows
-                result.transform_rows = transform.row_count
-                self.context.record("transform", rows=transform.row_count)
+            steps = render_all(cfg.transform, template_context)
+            if execution == "pushdown":
+                # Run setup steps; keep the curated SELECT for INSERT … SELECT.
+                prepared = self.transformer.prepare(source, steps)
+                if prepared:
+                    select_sql = prepared
+                    self.context.record("transform:pushdown", sql=prepared, materialized=False)
+            else:
+                transform = self.transformer.apply(source, steps)
+                if transform.applied:
+                    payload = transform.rows
+                    select_sql = transform.sql
+                    result.transform_rows = transform.row_count
+                    self.context.record("transform", rows=transform.row_count)
         except Exception as exc:
             transform_ok = False
             self._fail(result, "transform", exc)
@@ -283,14 +333,26 @@ class Pipeline:
             target = None
             try:
                 target = self.resolve_source(cfg.target.connection)
-                load_result = self.loader.load(
-                    target,
-                    cfg.target.table,
-                    payload,
-                    mode=cfg.target.mode,
-                    keys=cfg.target.keys,
-                    allow_empty=cfg.target.allow_empty,
-                )
+                if execution == "pushdown":
+                    load_result = self.pushdown_loader.load(
+                        source,  # same warehouse hosts both sides
+                        cfg.target.table,
+                        select_sql,
+                        mode=cfg.target.mode,
+                        keys=cfg.target.keys,
+                        allow_empty=cfg.target.allow_empty,
+                    )
+                    if load_result.inserted is not None:
+                        result.transform_rows = load_result.inserted
+                else:
+                    load_result = self.loader.load(
+                        target,
+                        cfg.target.table,
+                        payload,
+                        mode=cfg.target.mode,
+                        keys=cfg.target.keys,
+                        allow_empty=cfg.target.allow_empty,
+                    )
                 result.load = load_result
                 self.context.record(
                     "load",

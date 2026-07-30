@@ -33,6 +33,14 @@ class ExtractSpec:
         return self.mode.lower() == "incremental"
 
 
+# How the pipeline moves data:
+#   "rows"     — read into Python and INSERT … VALUES (cross-system moves)
+#   "pushdown" — INSERT … SELECT executed in the warehouse (same-warehouse, any scale)
+#   "auto"     — pushdown when source and target are the same connection and a
+#                transform SELECT exists, otherwise rows
+EXECUTION_MODES = ("auto", "rows", "pushdown")
+
+
 @dataclass
 class TargetSpec:
     connection: str | None = None
@@ -59,6 +67,8 @@ class PipelineConfig:
     schedule: str | None = None
     # User-defined variables exposed to SQL templates alongside batch_id/run_id.
     vars: dict[str, Any] = field(default_factory=dict)
+    # How data moves: auto | rows | pushdown (see EXECUTION_MODES).
+    execution: str = "auto"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PipelineConfig":
@@ -98,6 +108,12 @@ class PipelineConfig:
                 allow_empty=bool(target_data.get("allow_empty") or False),
             )
 
+        execution = str(pipeline.get("execution") or "auto").lower()
+        if execution not in EXECUTION_MODES:
+            raise ValueError(
+                f"Invalid execution mode {execution!r} (expected one of {', '.join(EXECUTION_MODES)})"
+            )
+
         validate = pipeline.get("validate") or {}
         return cls(
             name=str(name),
@@ -112,6 +128,7 @@ class PipelineConfig:
             checks=list(pipeline.get("checks") or []),
             schedule=pipeline.get("schedule"),
             vars=dict(pipeline.get("vars") or {}),
+            execution=execution,
         )
 
 

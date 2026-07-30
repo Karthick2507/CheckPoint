@@ -13,6 +13,16 @@ pipeline:
   name: request_daily
   env: prod
 
+  # How data moves:
+  #   auto     (default) pushdown when source and target are the same
+  #            connection, otherwise rows
+  #   pushdown INSERT … SELECT run in the warehouse — no rows travel through
+  #            Python, so cost is independent of row count. Use for
+  #            same-warehouse work at TiB scale.
+  #   rows     read into Python and INSERT … VALUES. Required for moving data
+  #            BETWEEN systems (e.g. Presto -> Snowflake), as configured below.
+  execution: auto
+
   # Variables available to every SQL template below, alongside the built-ins
   # {{ batch_id }}, {{ run_id }}, {{ pipeline }} and {{ env }}.
   # Rendering is strict: an unknown {{ name }} fails the stage rather than

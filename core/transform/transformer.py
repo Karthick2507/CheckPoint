@@ -38,3 +38,17 @@ class Transformer:
         curated_sql = steps[-1]
         rows = source.execute(curated_sql)
         return TransformResult(rows=rows, sql=curated_sql, row_count=len(rows), applied=True)
+
+    def prepare(self, source: DataSource, steps: list[str]) -> str | None:
+        """Run the setup steps and return the curated SELECT *without* running it.
+
+        Used by the pushdown path: the final SELECT is not executed here, it is
+        embedded into an ``INSERT … SELECT`` so the warehouse never ships rows
+        back to the framework.
+        """
+        steps = [s for s in (steps or []) if s and s.strip()]
+        if not steps:
+            return None
+        for setup_sql in steps[:-1]:
+            source.execute(setup_sql)
+        return steps[-1]
