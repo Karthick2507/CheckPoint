@@ -17,3 +17,11 @@ connection:
   request_timeout: 30
   auth_token: ${PRESTO_AUTH_TOKEN}   # sent as "Authorization: Bearer <token>"
   auth_header: Authorization
+
+  # Transient failures (gateway blips, dropped sockets, 503s) are retried with
+  # exponential backoff + jitter. Reads retry; writes do not, because
+  # re-issuing a partially applied INSERT is how duplicates get created.
+  # Permanent failures (missing table, syntax error) never retry.
+  retry_attempts: 3
+  retry_initial_delay: 1
+  retry_max_delay: 30

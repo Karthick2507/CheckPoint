@@ -32,6 +32,24 @@ class Capabilities:
     supports_transactions: bool = True
 
 
+_READ_PREFIXES = ("select", "with", "describe", "show", "explain", "pragma")
+
+
+def _looks_like_read(sql: str) -> bool:
+    """Whether ``sql`` is safe to re-issue after a transient failure.
+
+    Only read statements qualify: re-running a partially applied INSERT or
+    DELETE could duplicate or double-delete rows. Anything unrecognised is
+    treated as a write, which is the safe default.
+    """
+    statement = (sql or "").lstrip().lstrip("(").lstrip()
+    # Skip leading SQL comments so a commented query is still classified.
+    while statement.startswith("--"):
+        _, _, statement = statement.partition("\n")
+        statement = statement.lstrip()
+    return statement[:8].lower().startswith(_READ_PREFIXES)
+
+
 class Transaction:
     """Runs statements on a single connection inside one transaction."""
 
@@ -61,6 +79,7 @@ class DataSource(ABC):
         self.config = dict(config or {})
         self.name = self.config.get("name") or self.type
         self._engine: Any = None
+        self._retry_policy: Any = None
 
     # -- required of every source ----------------------------------------
 
@@ -86,16 +105,50 @@ class DataSource(ABC):
             self._engine = create_engine(self.connection_string(), **self.engine_kwargs())
         return self._engine
 
-    def execute(self, sql: str) -> list[dict[str, Any]]:
+    # -- retry policy ------------------------------------------------------
+
+    @property
+    def retry_policy(self) -> Any:
+        """Retry policy for transient failures, from connection config."""
+        from runtime.retry import RetryPolicy
+
+        if self._retry_policy is None:
+            self._retry_policy = RetryPolicy(
+                attempts=int(self.config.get("retry_attempts") or 3),
+                initial_delay=float(self.config.get("retry_initial_delay") or 1.0),
+                max_delay=float(self.config.get("retry_max_delay") or 30.0),
+            )
+        return self._retry_policy
+
+    def execute(self, sql: str, retry: bool | None = None) -> list[dict[str, Any]]:
         """Run ``sql`` and return rows as a list of dicts.
 
-        Uses a raw DBAPI cursor so it works uniformly across dialects.
-        Statements with no result set return ``[]``.
-
-        A write that cannot be committed **raises** — a silently dropped commit
-        is indistinguishable from a successful load and would corrupt the run's
-        reported results.
+        Transient failures (gateway blips, dropped sockets, timeouts) are
+        retried with exponential backoff. **Reads retry; writes do not** unless
+        ``retry=True`` is passed explicitly — re-issuing a statement that may
+        have partially applied is how duplicate rows get created. A query whose
+        failure is permanent (missing table, syntax error) is never retried.
         """
+        from runtime.retry import with_retry
+
+        should_retry = _looks_like_read(sql) if retry is None else retry
+        if not should_retry:
+            return self._execute_once(sql)
+        return with_retry(
+            lambda: self._execute_once(sql),
+            policy=self.retry_policy,
+            description=f"query on {self.name}",
+            on_retry=self._log_retry,
+        )
+
+    def _log_retry(self, attempt: int, exc: BaseException, delay: float) -> None:
+        print(
+            f"[{self.name}] transient failure on attempt {attempt} "
+            f"({type(exc).__name__}: {exc}); retrying in {delay:.1f}s",
+            file=sys.stderr,
+        )
+
+    def _execute_once(self, sql: str) -> list[dict[str, Any]]:
         engine = self.get_engine()
         connection = engine.raw_connection()
         cursor = None
