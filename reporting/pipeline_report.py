@@ -79,6 +79,21 @@ def collect_warnings(result: "PipelineResult") -> list[WarnRow]:
             )
         )
 
+    # A refused destructive load is an operational event the operator must see.
+    load = result.load
+    if load is not None and load.skipped and load.reason and load.mode in ("overwrite", "merge"):
+        rows.append(
+            WarnRow(
+                gate="load",
+                severity="critical",
+                dimension="load",
+                target=load.target,
+                subject=f"{load.mode}_skipped",
+                observed=0,
+                detail=load.reason,
+            )
+        )
+
     # critical first, then by gate
     rows.sort(key=lambda r: (r.severity != "critical", r.gate))
     return rows

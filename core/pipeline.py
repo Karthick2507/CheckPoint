@@ -180,9 +180,17 @@ class Pipeline:
                 payload,
                 mode=cfg.target.mode,
                 keys=cfg.target.keys,
+                allow_empty=cfg.target.allow_empty,
             )
             result.load = load_result
-            self.context.record("load", target=cfg.target.table, mode=load_result.mode, inserted=load_result.inserted)
+            self.context.record(
+                "load",
+                target=cfg.target.table,
+                mode=load_result.mode,
+                inserted=load_result.inserted,
+                skipped=load_result.skipped,
+                reason=load_result.reason,
+            )
 
             # 6. Gate: post-load
             if cfg.suite_post:

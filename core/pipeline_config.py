@@ -39,6 +39,9 @@ class TargetSpec:
     table: str | None = None
     mode: str = "append"  # append | overwrite | merge | none
     keys: list[str] = field(default_factory=list)
+    # Opt in to a destructive load (overwrite/merge) with an empty payload.
+    # Off by default so a missing upstream batch cannot wipe the target.
+    allow_empty: bool = False
 
 
 @dataclass
@@ -90,6 +93,7 @@ class PipelineConfig:
                 table=target_data.get("table"),
                 mode=str(target_data.get("mode") or "append"),
                 keys=list(target_data.get("keys") or []),
+                allow_empty=bool(target_data.get("allow_empty") or False),
             )
 
         validate = pipeline.get("validate") or {}

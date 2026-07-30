@@ -8,6 +8,13 @@ Modes:
                   (delete+insert upsert; supports single or composite keys).
 * ``none``      — skip loading (validation-only pipelines).
 
+**Empty-payload guard.** ``overwrite`` and ``merge`` are destructive: they delete
+before they insert. If the payload is empty — a late or missing upstream batch,
+a transform that filtered everything out, a failed extract — deleting would wipe
+the target and replace it with nothing. Such a load is therefore **skipped** and
+reported as ``skipped_empty``. Set ``allow_empty=True`` (config: ``allow_empty:
+true``) to opt into a deliberate "truncate to empty" load.
+
 Rows are written as batched ``INSERT ... VALUES`` with SQL-literal escaping, so
 the loader works across dialects and, crucially, **across sources** (e.g. Presto
 to Snowflake). For very large in-warehouse loads, an ``INSERT ... SELECT``
@@ -25,12 +32,17 @@ from data_sources.base import DataSource
 _INSERT_BATCH = 500
 
 
+DESTRUCTIVE_MODES = ("overwrite", "merge")
+
+
 @dataclass
 class LoadResult:
     target: str
     mode: str
     inserted: int
     deleted: int = 0
+    skipped: bool = False
+    reason: str = ""
 
 
 def sql_literal(value: Any) -> str:
@@ -51,10 +63,24 @@ class Loader:
         rows: Sequence[dict[str, Any]],
         mode: str = "append",
         keys: Sequence[str] | None = None,
+        allow_empty: bool = False,
     ) -> LoadResult:
         mode = (mode or "append").lower()
         if mode == "none":
-            return LoadResult(target=table, mode=mode, inserted=0)
+            return LoadResult(target=table, mode=mode, inserted=0, skipped=True, reason="mode is 'none'")
+
+        # Refuse to delete when there is nothing to put back (see module docstring).
+        if not rows and mode in DESTRUCTIVE_MODES and not allow_empty:
+            return LoadResult(
+                target=table,
+                mode=mode,
+                inserted=0,
+                skipped=True,
+                reason=(
+                    f"refused to run destructive '{mode}' load with an empty payload "
+                    f"(would delete {table} and insert nothing); set allow_empty: true to override"
+                ),
+            )
 
         deleted = 0
         if mode == "overwrite":
