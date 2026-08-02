@@ -40,8 +40,15 @@ class Extractor:
         batch_id: str | None = None,
         incremental: bool = False,
         limit: int | None = None,
+        projection: str = "*",
     ) -> str:
-        sql = f"SELECT * FROM {table}"
+        """Build the source SELECT.
+
+        ``projection`` comes from the pipeline's schema contract; it is ``*``
+        only when no contract is declared, which leaves the pipeline exposed to
+        upstream column drift.
+        """
+        sql = f"SELECT {projection} FROM {table}"
         if incremental:
             if not batch_key:
                 raise ValueError("incremental extract requires a source 'batch_key'")

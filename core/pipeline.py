@@ -30,6 +30,7 @@ from typing import Any, Callable
 from core.extract import Extractor
 from core.load import Loader, LoadResult, PushdownLoader, PushdownResult
 from core.pipeline_config import PipelineConfig
+from core.schema import SchemaContract
 from core.transform import Transformer
 from core.validate import GEValidationFramework, ValidationOutcome, load_suite_config
 from core.validate.scoping import scope_suite_to_batch
@@ -37,6 +38,7 @@ from core.validate.suite_config import SuiteConfig
 from data_sources.base import DataSource
 from quality import CHECK_TYPES, CheckResult, QualityCheck, VolumeDriftCheck
 from runtime.run_context import RunContext
+from runtime.sql import identifier_quote_for
 from runtime.state import FileState
 from runtime.templating import render_all, render_sql
 
@@ -152,6 +154,7 @@ class Pipeline:
         # time. Created lazily so a pipeline with no gates pays nothing.
         self._ge_context: Any = None
         self._resolved: dict[str, DataSource] = {}
+        self._contract: SchemaContract | None = None
 
     # -- resources ---------------------------------------------------------
 
@@ -222,16 +225,27 @@ class Pipeline:
             return False, f"streaming supports only append loads (target mode is {target.mode!r})"
         return True, ""
 
+    @property
+    def contract(self) -> SchemaContract:
+        """The pipeline's declared schema contract (empty if none)."""
+        if self._contract is None:
+            self._contract = SchemaContract.from_config(
+                self.config.source.columns, strict=self.config.source.strict_columns
+            )
+        return self._contract
+
     def _source_sql(self, cfg: PipelineConfig, template_context: dict[str, Any]) -> str:
         """The SELECT that defines the source data set."""
         if cfg.source.query:
             return render_sql(cfg.source.query, template_context)
+        quote = identifier_quote_for(self._source(cfg.source.connection))
         return self.extractor.build_table_sql(
             cfg.source.table or "",
             batch_key=cfg.source.batch_key,
             batch_id=self.context.batch_id,
             incremental=cfg.extract.incremental,
             limit=cfg.extract.limit,
+            projection=self.contract.projection(quote),
         )
 
     # -- failure capture --------------------------------------------------
@@ -421,6 +435,15 @@ class Pipeline:
             target = None
             try:
                 target = self._source(cfg.target.connection)
+                if execution == "rows" and not streaming:
+                    # Pin the payload's shape before writing. Without a
+                    # contract, at least insist the rows agree with each other:
+                    # the loader takes its columns from row 0 and would
+                    # otherwise drop every value under a key row 0 lacks.
+                    if self.contract.declared:
+                        payload = self.contract.conform(payload)
+                    else:
+                        self.contract.check_uniform(payload)
                 if streaming:
                     _, chunks = self.extractor.stream(
                         source, query=source_sql, chunk_size=cfg.extract.chunk_size
