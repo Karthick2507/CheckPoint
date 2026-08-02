@@ -62,6 +62,7 @@ etl_framework/
 │   │   └── scoping.py     #   narrow an asset to the current batch
 │   ├── load/              # loader.py (rows) + pushdown.py (INSERT … SELECT)
 │   ├── pipeline_config.py # declarative PipelineConfig
+│   ├── schema.py          # SchemaContract: projection + column mapping
 │   └── pipeline.py        # the orchestrator (extract→gates→transform→load)
 ├── quality/               # the 4 non-native checks
 │   ├── freshness.py
@@ -73,7 +74,8 @@ etl_framework/
 │   ├── run_context.py     # run_id / batch_id / lineage / output layout
 │   ├── state.py           # durable baselines (atomic writes, flock, retention)
 │   ├── templating.py      # strict, sandboxed Jinja SQL rendering
-│   └── sql.py             # shared sql_literal / batch predicate helpers
+│   ├── retry.py           # transient-failure retry with backoff
+│   └── sql.py             # sql_literal / identifier quoting / batch predicate
 ├── reporting/             # manifest + warnings report + quarantine + console
 ├── config/                # analyst-facing YAML
 │   ├── connections/       #   sources & targets
@@ -92,10 +94,17 @@ class DataSource(ABC):
     type: str
     def connection_string(self) -> str        # SQLAlchemy URL
     def engine_kwargs(self) -> dict           # connect_args / auth
-    def execute(self, sql) -> list[dict]      # shared machinery
+    def execute(self, sql) -> list[dict]      # shared machinery, with retry
+    def stream(self, sql, chunk_size) -> Iterator[list[dict]]   # bounded memory
+    def transaction(self) -> Transaction      # atomic multi-statement work
     def describe(self, table) -> list[dict]   # schema introspection
     def capabilities(self) -> Capabilities    # dialect quirks
 ```
+
+`Capabilities` is not decoration — it drives real behaviour: `identifier_quote`
+quotes emitted SQL (so a column named `order` works), and
+`supports_transactions` decides whether a destructive load can be made atomic or
+must be reported as `atomic=False`.
 
 Because Great Expectations' Fluent `add_sql(connection_string, kwargs)` is
 dialect-driven, **Presto (`trino://`) and Snowflake (`snowflake://`) validate
@@ -123,20 +132,32 @@ warehouse-aware logic. All run warn-and-continue.
 | Completeness | GE suite | `expect_column_values_to_not_be_null` |
 | Uniqueness | GE suite | `expect_column_values_to_be_unique` |
 | Freshness | `quality/freshness.py` | `MAX(ts)` vs `now()` lag threshold |
-| Volume-drift | `quality/volume_drift.py` | batch-scoped `COUNT(*)` vs **median** baseline (± tolerance) |
+| Volume-drift | `quality/volume_drift.py` | `COUNT(*)` vs **median** baseline (± tolerance) |
 | Schema-drift | `quality/schema_drift.py` | `describe()` vs saved schema snapshot |
-| Referential integrity | `quality/referential.py` | anti-join orphan count (ELT pushdown) |
+| Referential integrity | `quality/referential.py` | anti-join orphan count (in-warehouse) |
 
 Volume/schema depend on `runtime.state.FileState` for their baselines.
 
-**Volume-drift is batch-scoped.** Counting the whole table is meaningless on an
-append-only warehouse — the total only grows, so the baseline chases it and a
-failed batch is invisible (100k historical rows + 0 new rows still counts
-~100k). Set `batch_key` on the check to count only this run's slice. The centre
-is the **median** (a mean is dragged by the very spikes it should catch), runs
-that fail are recorded as anomalies and excluded from later baselines, and the
-check reports "establishing baseline" until `min_history` observations exist
-rather than judging against one or two samples.
+**Scope checks to the batch** with `batch_key` (or `batch_filter`). Unscoped,
+each of these reads all history, which is slower every run *and* frequently
+wrong:
+
+- *Volume* — on an append-only table the total only grows, so the baseline
+  chases it and a failed batch is invisible (100k historical rows + 0 new rows
+  still counts ~100k).
+- *Freshness* — `MAX(ts)` finds any fresher historical row, so a month-old
+  batch reports healthy.
+- *Referential integrity* — one historical orphan fails the check forever
+  regardless of today's data. Only the **child** side is scoped; parents may
+  legitimately predate the batch.
+
+Schema-drift is deliberately *not* batch-scoped: schema is a property of the
+table, not of a batch.
+
+**Volume-drift baselines are robust.** The centre is the **median** (a mean is
+dragged by the very spikes it should catch), runs that fail are recorded as
+anomalies and excluded from later baselines, and nothing is judged until
+`min_history` observations exist.
 
 ## 6. Warn-and-continue model
 
@@ -221,7 +242,40 @@ a failure part-way rolls back; targets that cannot roll back (Trino/Presto over
 Hive-like connectors) declare `supports_transactions=False` and the load is
 reported with `atomic=False` rather than pretending.
 
-## 10. Execution flow
+## 10. Schema contract
+
+`source.columns` declares the columns a pipeline reads and their names on the
+target — projection and mapping in one place:
+
+```yaml
+source:
+  columns:
+    request__transaction_id: transaction_id
+    request__event_time: event_time
+  strict_columns: true
+```
+
+Without it the extract is `SELECT *`, and an upstream column addition, removal,
+or reorder flows straight to the target with nothing noticing. The contract also
+pins the payload before a load: `strict_columns` makes a row missing a declared
+column an error rather than a silent NULL. With no contract declared the
+framework at least insists the rows agree with each other — the loader takes its
+columns from row 0, and previously dropped every value under a key row 0 lacked.
+
+## 11. Reliability
+
+- **Retries.** Transient failures (timeouts, resets, 502/503/504, gateway
+  errors) retry with exponential backoff and jitter. Permanent failures
+  (missing table, syntax error, permission denied) never retry — they cannot
+  succeed and retrying only delays the report. **Reads retry; writes do not**
+  unless the caller opts in, because re-issuing a partially applied `INSERT` is
+  how duplicate rows appear.
+- **Resources.** One GE context serves every gate (a fresh ephemeral context per
+  gate re-registered the datasource and opened another engine), connections
+  resolve once per run, and `run()` disposes every engine in a `finally` so a
+  long-lived scheduler process does not accumulate pools.
+
+## 12. Execution flow
 
 `Pipeline.run()` — never raises:
 
@@ -238,7 +292,7 @@ Each gate is narrowed to the current batch when its asset declares `batch_key`.
 Returns a `PipelineResult` aggregating `ValidationOutcome`s, `CheckResult`s and
 `StageError`s, with `passed`, `has_critical_failure`, and `failure_count`.
 
-## 11. Testing strategy
+## 13. Testing strategy
 
 The connector layer's SQL machinery is dialect-agnostic, so the **entire flow is
 exercised against a temporary sqlite database** — extract, transform, load
@@ -246,9 +300,9 @@ exercised against a temporary sqlite database** — extract, transform, load
 report generation — **without needing a live Presto/Trino gateway**. Pure units
 (connection strings, config parsing, expectation factory, exit-code policy) are
 tested directly, and every P0-P2 fix ships with a test that first reproduces
-the original defect. Current coverage: **232 tests**.
+the original defect. Current coverage: **336 tests**.
 
-## 12. Decisions log (locked)
+## 14. Decisions log (locked)
 
 | Decision | Choice |
 |---|---|
@@ -261,7 +315,7 @@ the original defect. Current coverage: **232 tests**.
 | Sources | Multi-source; Presto first, Snowflake + others pluggable under `data_sources/` |
 | GE placement | Folded into `core/validate/`, source-agnostic |
 
-## 13. Future extensions
+## 15. Future extensions
 
 - Airflow / Dagster wrappers over the same CLI (core is orchestrator-agnostic).
 - Additional connectors (BigQuery, Databricks, Postgres) — one folder each.
