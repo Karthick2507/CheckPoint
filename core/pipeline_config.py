@@ -21,6 +21,10 @@ class SourceSpec:
     table: str | None = None
     query: str | None = None
     batch_key: str | None = None
+    # Explicit schema contract. Without it the extract is SELECT * and any
+    # upstream column change flows straight through to the target unnoticed.
+    columns: Any = None
+    strict_columns: bool = True
 
 
 @dataclass
@@ -89,6 +93,8 @@ class PipelineConfig:
             table=source_data.get("table"),
             query=source_data.get("query"),
             batch_key=source_data.get("batch_key"),
+            columns=source_data.get("columns"),
+            strict_columns=bool(source_data.get("strict_columns", True)),
         )
         if not source.table and not source.query:
             raise ValueError("Pipeline source requires a 'table' or a 'query'")

@@ -35,6 +35,19 @@ pipeline:
     table: mrm_log_flat.default.request
     batch_key: process_batch_id        # incremental filter key
 
+    # Schema contract. Without this the extract is SELECT *, and an upstream
+    # column addition, removal or reorder flows straight to the target with
+    # nothing noticing. Declaring columns also renames them for the target, so
+    # the projection and the mapping are one thing.
+    # Accepts a list ([a, b]), a mapping (source: target), or {source:, as:}.
+    columns:
+      request__transaction_id: transaction_id
+      request__event_time: event_time
+      request__duration: duration
+    # strict_columns: true  -> a row missing a declared column fails the run
+    #                          rather than being written as a silent NULL.
+    strict_columns: true
+
   extract:
     mode: incremental                  # full | incremental (WHERE process_batch_id = <batch_id>)
     limit: 100000

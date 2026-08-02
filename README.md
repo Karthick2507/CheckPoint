@@ -17,8 +17,8 @@ SOURCE ─► EXTRACT ─►[gate: raw]─► TRANSFORM ─►[gate: curated]─
 | Connectors | `data_sources/` | `DataSource` ABC + registry; Presto & Snowflake connectors — add a source with one folder + one `@register` line |
 | Extract / Transform / Load | `core/extract`, `core/transform`, `core/load` | incremental & streaming reads, ELT SQL, `INSERT … SELECT` pushdown or row-based append/overwrite/merge |
 | Validate | `core/validate/` | Great Expectations, source-agnostic, scoped to the current batch |
-| Quality | `quality/` | freshness, volume-drift, schema-drift, referential integrity |
-| Runtime | `runtime/` | run context (run_id/batch_id/lineage), durable baselines, SQL templating |
+| Quality | `quality/` | freshness, volume-drift, schema-drift, referential integrity — batch-scoped, robust baselines |
+| Runtime | `runtime/` | run context (run_id/batch_id/lineage), durable baselines, SQL templating, retries |
 | Reporting | `reporting/` | run manifest + warnings report + quarantined rows |
 | Orchestrator | `core/pipeline.py` | chains the stages through 3 quality gates |
 | CLI | `cli.py` | `run-pipeline`, `validate`, `list-expectations`, `list-sources` |
@@ -66,7 +66,13 @@ expectations:
 pipeline:
   name: request_daily
   execution: auto                   # auto | pushdown | rows  (see below)
-  source:  { connection: mrm_presto, table: mrm_log_flat.default.request, batch_key: process_batch_id }
+  source:
+    connection: mrm_presto
+    table: mrm_log_flat.default.request
+    batch_key: process_batch_id
+    columns:                        # schema contract: projection + rename
+      request__transaction_id: transaction_id
+      request__event_time: event_time
   extract: { mode: incremental }    # add `stream: true` for large cross-system moves
   transform:
     - "SELECT request__transaction_id AS transaction_id FROM mrm_log_flat.default.request WHERE process_batch_id = '{{ batch_id }}'"
@@ -90,6 +96,18 @@ SQL is rendered with `{{ batch_id }}`, `{{ run_id }}`, `{{ env }}` and anything 
 `auto` picks pushdown when source and target share a connection, else rows.
 
 **Load safety:** `overwrite`/`merge` refuse to run with an empty payload (a missing upstream batch must not wipe the target) unless `allow_empty: true`; delete and insert run in one transaction, and targets that cannot roll back are reported with `atomic: false` rather than pretending.
+
+## Schema contract
+
+`source.columns` names the columns a pipeline reads and what they are called on the target — projection and mapping in one place. Without it the extract is `SELECT *`, so an upstream column addition, removal, or reorder flows straight through unnoticed. It accepts a list (`[a, b]`), a `source: target` mapping, or `{source:, as:}` entries.
+
+`strict_columns: true` (the default) makes a row missing a declared column fail the run instead of being written as a silent NULL. With no contract declared, the framework still insists rows agree with each other — the loader takes its column list from the first row and would otherwise drop every value under a key that row happens to lack.
+
+## Reliability
+
+Transient failures (timeouts, resets, 502/503/504) retry with exponential backoff and jitter — configurable per connection via `retry_attempts` / `retry_initial_delay` / `retry_max_delay`. Permanent failures (missing table, syntax error) never retry. **Reads retry; writes do not**, because re-issuing a partially applied `INSERT` is how duplicate rows appear.
+
+Identifiers are quoted with the dialect's own quote character, so a column named `order` or `select` works. One Great Expectations context serves every gate, connections resolve once per run, and every engine is disposed when the run ends.
 
 ## Run
 
@@ -137,7 +155,7 @@ state/                     # PERSISTENT — must survive between runs
 
 Native GE covers **completeness** and **uniqueness** (in suites). The `quality/` package adds **freshness**, **volume-drift**, **schema-drift**, and **referential integrity** — the dimensions that need warehouse-aware logic and baselines.
 
-Drift checks are batch-scoped and use a **median** baseline: on an append-only table a whole-table count only ever grows, so a failed batch would be invisible, and a mean would be dragged by the very spikes it should catch. Failed runs are recorded as anomalies and excluded from future baselines, and nothing is judged until `min_history` observations exist.
+Freshness, volume-drift and referential-integrity checks are batch-scoped (`batch_key`), and volume-drift uses a **median** baseline: on an append-only table a whole-table count only ever grows, so a failed batch would be invisible, and a mean would be dragged by the very spikes it should catch. Failed runs are recorded as anomalies and excluded from future baselines, and nothing is judged until `min_history` observations exist.
 
 ## Tests
 
@@ -145,7 +163,7 @@ Drift checks are batch-scoped and use a **median** baseline: on an append-only t
 python -m pytest tests/ -q
 ```
 
-The connector layer is dialect-agnostic, so the full flow — extract, transform, load (incl. cross-source), all three GE gates, the four custom checks, and reporting — is exercised end-to-end against **sqlite**, no live Presto required (232 tests).
+The connector layer is dialect-agnostic, so the full flow — extract, transform, load (incl. cross-source), all three GE gates, the four custom checks, and reporting — is exercised end-to-end against **sqlite**, no live Presto required (336 tests).
 
 ## Extending: add a data source
 
