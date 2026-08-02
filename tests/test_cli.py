@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import yaml
@@ -132,3 +133,54 @@ def test_run_pipeline_command_end_to_end(tmp_path):
     assert "req_pipe" in result.stdout
     # manifest was written
     assert list((tmp_path / "out" / "runs").glob("*/run_manifest.json"))
+
+
+# --------------------------------------------------------------------------
+# Batch selection (backfills / re-runs)
+# --------------------------------------------------------------------------
+
+
+def test_batch_id_override(tmp_path):
+    """Without --batch-id you can only ever process 'now - 24h'."""
+    import sqlite3
+
+    db = tmp_path / "b.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE t (id INTEGER, pb TEXT)")
+    con.executemany("INSERT INTO t VALUES (?, ?)", [(1, "OLD"), (2, "TARGET")])
+    con.commit()
+    con.close()
+
+    conns = tmp_path / "conns"
+    conns.mkdir()
+    (conns / "c.yml").write_text(
+        yaml.safe_dump({"connection": {"name": "src", "type": "sqlite", "path": str(db)}})
+    )
+    pipeline = tmp_path / "p.yml"
+    pipeline.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline": {
+                    "name": "bp",
+                    "execution": "rows",
+                    "source": {"connection": "src", "table": "t", "batch_key": "pb"},
+                    "extract": {"mode": "incremental"},
+                }
+            }
+        )
+    )
+    result = runner.invoke(
+        app,
+        ["run-pipeline", "--pipeline", str(pipeline), "--connections-dir", str(conns),
+         "--output-dir", str(tmp_path / "out"), "--state-dir", str(tmp_path / "st"),
+         "--batch-id", "TARGET"],
+    )
+    assert result.exit_code == 0, result.stdout
+    manifest = json.loads(next((tmp_path / "out" / "runs").glob("*/run_manifest.json")).read_text())
+    assert manifest["context"]["batch_id"] == "TARGET"
+    assert manifest["extract_rows"] == 1, "only the requested batch was read"
+
+
+def test_sqlite_connector_registered():
+    result = runner.invoke(app, ["list-sources"])
+    assert "sqlite" in result.stdout
