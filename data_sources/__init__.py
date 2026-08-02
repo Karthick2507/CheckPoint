@@ -17,6 +17,7 @@ from data_sources.registry import available_sources, create_data_source, registe
 # Import connectors so their @register decorators populate the registry.
 from data_sources.presto import PrestoDataSource  # noqa: E402,F401
 from data_sources.snowflake import SnowflakeDataSource  # noqa: E402,F401
+from data_sources.sqlite import SqliteDataSource  # noqa: E402,F401
 
 __all__ = [
     "DataSource",
@@ -28,4 +29,5 @@ __all__ = [
     "load_yaml",
     "PrestoDataSource",
     "SnowflakeDataSource",
+    "SqliteDataSource",
 ]

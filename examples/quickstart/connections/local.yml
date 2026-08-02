@@ -1,0 +1,10 @@
+# Quick-start connection: a local sqlite file, no infrastructure required.
+#
+# The connection `name` is how pipelines refer to it, so pipeline.yml says
+# `connection: local`. A real deployment swaps `type: sqlite` for
+# `type: presto` or `type: snowflake` and changes nothing else.
+
+connection:
+  name: local
+  type: sqlite
+  path: examples/quickstart/quickstart.db

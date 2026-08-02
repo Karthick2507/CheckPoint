@@ -1,0 +1,26 @@
+# Gate 1 (raw): validate the source BEFORE transforming.
+# batch_key narrows the gate to this run's slice, so yesterday's clean rows
+# cannot dilute today's defects.
+suite:
+  name: orders_raw
+  asset:
+    type: table
+    name: orders
+    table_name: orders
+    batch_key: batch_id
+
+expectations:
+  - id: order_id_present
+    type: expect_column_values_to_not_be_null
+    column: order_id
+    severity: critical
+
+  - id: customer_present            # FAILS: row 5 has a NULL customer
+    type: expect_column_values_to_not_be_null
+    column: customer_id
+    severity: critical
+
+  - id: order_id_unique
+    type: expect_column_values_to_be_unique
+    column: order_id
+    severity: critical

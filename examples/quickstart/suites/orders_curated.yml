@@ -1,0 +1,23 @@
+# Gate 2 (curated): validate the transformed shape, via a query asset.
+# The query is templated with the same variables as the pipeline SQL.
+suite:
+  name: orders_curated
+  asset:
+    type: query
+    name: orders_curated
+    query: >
+      SELECT order_id AS id, customer_id AS customer, amount
+      FROM orders
+      WHERE batch_id = '{{ batch_id }}'
+
+expectations:
+  - id: amount_non_negative         # FAILS: row 6 has amount -50
+    type: expect_column_values_to_be_between
+    column: amount
+    min_value: 0
+    severity: warning
+
+  - id: id_unique
+    type: expect_column_values_to_be_unique
+    column: id
+    severity: critical

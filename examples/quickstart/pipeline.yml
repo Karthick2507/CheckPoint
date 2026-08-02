@@ -1,0 +1,86 @@
+# Quick-start pipeline — the whole framework in one file.
+#
+#   python examples/quickstart/seed.py
+#   python -m cli run-pipeline \
+#     --pipeline examples/quickstart/pipeline.yml \
+#     --connections-dir examples/quickstart/connections \
+#     --state-dir examples/quickstart/state
+#
+# Expected result: the run COMPLETES and loads rows, and reports 2 failures
+# (a NULL customer and a negative amount). That is warn-and-continue working —
+# bad data is reported and quarantined, not swallowed, and not fatal.
+
+pipeline:
+  name: quickstart_orders
+  env: local
+
+  # Source and target are the same sqlite file, so `auto` picks pushdown:
+  # INSERT … SELECT runs inside the database and no rows pass through Python.
+  execution: auto
+
+  vars:
+    min_amount: 0
+
+  source:
+    connection: local
+    table: orders
+    batch_key: batch_id        # incremental + batch-scoping key
+
+    # Schema contract: the columns this pipeline depends on, renamed for the
+    # target. Without it the extract would be SELECT * and an upstream column
+    # change would flow straight through.
+    columns:
+      order_id: id
+      customer_id: customer
+      amount: amount
+    strict_columns: true
+
+  extract:
+    mode: incremental          # WHERE batch_id = '{{ batch_id }}'
+
+  # ELT: the transform runs in the database. The last SELECT is the payload.
+  transform:
+    - >
+      SELECT
+        order_id   AS id,
+        customer_id AS customer,
+        amount      AS amount,
+        '{{ run_id }}' AS loaded_at
+      FROM orders
+      WHERE batch_id = '{{ batch_id }}'
+
+  target:
+    connection: local
+    table: orders_clean
+    mode: merge                # delete the incoming keys, then insert
+    keys: [id]
+    # allow_empty: false       # (default) never wipe the target with nothing
+
+  # Three quality gates. Each is warn-and-continue: a failure is reported,
+  # never fatal.
+  validate:
+    raw: examples/quickstart/suites/orders_raw.yml
+    curated: examples/quickstart/suites/orders_curated.yml
+    post: examples/quickstart/suites/orders_post.yml
+
+  # Custom checks beyond Great Expectations, scoped to this batch.
+  checks:
+    - type: freshness
+      target: orders
+      timestamp_column: created_at
+      batch_key: batch_id
+      max_lag_hours: 24
+      severity: critical
+
+    - type: volume_drift
+      target: orders
+      batch_key: batch_id
+      tolerance: 0.5
+      min_history: 3           # says "establishing baseline" until 3 runs exist
+      severity: warning
+
+    - type: schema_drift
+      target: orders
+      severity: warning
+
+  schedule: "0 6 * * *"        # documentation only; cron/Task Scheduler runs it
