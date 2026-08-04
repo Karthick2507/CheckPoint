@@ -8,14 +8,14 @@
 connection:
   name: mrm_presto
   type: presto
-  host: presto-gateway.presto.fw1.aws.fwmrm.net
+  host: https://presto-gateway.presto.stg.aws.fwmrm.net:8080
   port: 8080
-  user: ${PRESTO_USER}
+  user: kdhamotharan
   catalog: mrm_log_flat
   schema: default
   http_scheme: https
   request_timeout: 30
-  auth_token: ${PRESTO_AUTH_TOKEN}   # sent as "Authorization: Bearer <token>"
+  auth_token: 62e2d855-c564-4d62-95b2-8636679ae6d8   # sent as "Authorization: Bearer <token>"
   auth_header: Authorization
 
   # Transient failures (gateway blips, dropped sockets, 503s) are retried with

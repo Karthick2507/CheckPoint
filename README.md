@@ -34,7 +34,7 @@ You describe pipelines in YAML. The framework extracts, validates, transforms, v
 
 ```
 SOURCE ─► EXTRACT ─►[gate: raw]─► TRANSFORM ─►[gate: curated]─► LOAD ─►[gate: post]─► TARGET
-                         │                          │                       │
+                         │                          │                        │
                          └──────── Great Expectations + custom checks ───────┘
                                     (warn-and-continue, severity-tagged)
 ```
